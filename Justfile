@@ -18,6 +18,20 @@ run:
 nix:
     nix build .#flux --print-out-paths
 
+# Build the Arch Linux package with makepkg.
+pkg:
+    cd packaging/arch && makepkg -f
+
+# Build the Arch package and refresh the local pacman repository in repo/.
+repo: pkg
+    mkdir -p repo
+    cp packaging/arch/*.pkg.tar.zst repo/
+    repo-add repo/flux.db.tar.gz repo/flux-*.pkg.tar.zst
+
+# Serve repo/ over HTTP on port 8080.
+serve:
+    python -m http.server 8080 --directory repo
+
 # Create an annotated release tag from VERSION (for example, v0.1.0).
 tag:
     @version="$(cat VERSION)"; \

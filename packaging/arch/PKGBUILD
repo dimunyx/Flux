@@ -1,0 +1,32 @@
+# Maintainer: Flux contributors
+pkgname=flux
+# The root VERSION file is the single source of truth for the version.
+pkgver=$(<"$startdir/../../VERSION")
+pkgrel=1
+pkgdesc="A lightweight Linux software center"
+arch=('x86_64' 'aarch64')
+url="https://github.com/dimunyx/Flux"
+license=('GPL-3.0-only')
+depends=('glfw' 'freetype2' 'fontconfig' 'libpng' 'libepoxy' 'libglvnd')
+makedepends=('cmake' 'ninja' 'clang' 'pkgconf')
+optdepends=(
+  'pacman: package management on Arch Linux'
+  'polkit: authentication for package actions'
+)
+source=()
+sha256sums=()
+
+build() {
+  # The PKGBUILD lives in packaging/arch, so the project root is two levels up.
+  # Build out of tree in $srcdir to keep the working copy clean.
+  cmake -S "$startdir/../.." -B "$srcdir/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DFLUX_NATIVE=OFF
+  cmake --build "$srcdir/build" --parallel
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

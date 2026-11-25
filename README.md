@@ -92,6 +92,65 @@ just build
 
 > Flux's package management actions still call `/usr/bin/pacman` and `/usr/bin/pkexec` directly, so they work when Flux is installed with Nix on Arch Linux. On NixOS the interface starts, but installing and removing packages is unavailable.
 
+## Arch Linux package and local repository
+
+`packaging/arch/PKGBUILD` builds a native pacman package from the current checkout:
+
+```sh
+just pkg
+```
+
+This runs `makepkg` in `packaging/arch` and produces `flux-<version>-1-<arch>.pkg.tar.zst` there. To build, install missing build dependencies, and install the package in one step:
+
+```sh
+cd packaging/arch
+makepkg -si
+```
+
+To turn the package into a pacman repository inside this repository, build the package and add it to `repo/`:
+
+```sh
+just repo
+```
+
+Or do the same manually:
+
+```sh
+mkdir -p repo
+cp packaging/arch/*.pkg.tar.zst repo/
+repo-add repo/flux.db.tar.gz repo/flux-*.pkg.tar.zst
+```
+
+`repo-add` writes `flux.db.tar.gz` and `flux.files.tar.gz` (plus the `flux.db` and `flux.files` symlinks) next to the package. Point pacman at the directory with a `file://` server:
+
+```ini
+[flux]
+SigLevel = Optional TrustAll
+Server = file:///home/you/dev/Flux/repo
+```
+
+Or serve `repo/` over HTTP and use that URL instead:
+
+```sh
+just serve   # python -m http.server 8080 --directory repo
+```
+
+```ini
+[flux]
+SigLevel = Optional TrustAll
+Server = http://localhost:8080
+```
+
+Then refresh the databases and install:
+
+```sh
+sudo pacman -Syu flux
+```
+
+The `PKGBUILD` sets `-DFLUX_NATIVE=OFF` so the package does not depend on the CPU it was built on. Packages are unsigned; `SigLevel = Optional TrustAll` is fine for a local or test repository. For a public repository, sign the database and packages with GPG and require signatures in `pacman.conf`.
+
+To publish the repository from this Git repository, upload the contents of `repo/` to a static host or a `gh-pages` branch and use the published URL as `Server`. The `repo/` directory is a build artifact and is ignored by Git.
+
 ## One version for the app, tags, and packages
 
 The root [`VERSION`](VERSION) file is the single source of truth. It contains one semantic version in `MAJOR.MINOR.PATCH` form, such as `0.1.0`.
@@ -115,6 +174,9 @@ just build Debug # Configure and build Debug
 just package     # Build a versioned .tar.gz package
 just run         # Run the Release executable
 just nix         # Build the package with Nix (requires flakes)
+just pkg         # Build the Arch Linux package with makepkg
+just repo        # Build the package and refresh repo/ (pacman repository)
+just serve       # Serve repo/ over HTTP on port 8080
 just fmt         # Format C++ source with clang-format
 just tidy        # Run clang-tidy
 just clean       # Remove Makefiles build artifacts
