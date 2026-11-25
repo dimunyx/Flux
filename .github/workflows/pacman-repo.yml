@@ -1,0 +1,56 @@
+name: pacman repository
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Arch package and repository
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:base-devel bash -euo pipefail -c '
+            pacman -Syu --noconfirm --needed \
+              cmake ninja clang pkgconf glfw freetype2 fontconfig libpng libepoxy libglvnd
+            useradd -m builder
+            chown -R builder:builder /src
+            su builder -c "cd /src/packaging/arch && makepkg -f --noconfirm"
+            mkdir -p /src/repo
+            cp /src/packaging/arch/*.pkg.tar.zst /src/repo/
+            repo-add /src/repo/flux.db.tar.gz /src/repo/flux-*.pkg.tar.zst
+            rm -f /src/repo/*.old /src/repo/flux.db /src/repo/flux.files
+            cp /src/repo/flux.db.tar.gz /src/repo/flux.db
+            cp /src/repo/flux.files.tar.gz /src/repo/flux.files
+          '
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload repository
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

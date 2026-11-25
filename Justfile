@@ -27,6 +27,9 @@ repo: pkg
     mkdir -p repo
     cp packaging/arch/*.pkg.tar.zst repo/
     repo-add repo/flux.db.tar.gz repo/flux-*.pkg.tar.zst
+    rm -f repo/*.old repo/flux.db repo/flux.files
+    cp repo/flux.db.tar.gz repo/flux.db
+    cp repo/flux.files.tar.gz repo/flux.files
 
 # Serve repo/ over HTTP on port 8080.
 serve:

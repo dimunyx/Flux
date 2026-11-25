@@ -126,7 +126,7 @@ cp packaging/arch/*.pkg.tar.zst repo/
 repo-add repo/flux.db.tar.gz repo/flux-*.pkg.tar.zst
 ```
 
-`repo-add` writes `flux.db.tar.gz` and `flux.files.tar.gz` (plus the `flux.db` and `flux.files` symlinks) next to the package. Point pacman at the directory with a `file://` server:
+`repo-add` writes `flux.db.tar.gz` and `flux.files.tar.gz`. The recipe then replaces the `flux.db` and `flux.files` symlinks with real files, because static hosts such as GitHub Pages do not follow symlinks. Point pacman at the directory with a `file://` server:
 
 ```ini
 [flux]
@@ -155,6 +155,14 @@ sudo pacman -Syu flux
 The `PKGBUILD` sets `-DFLUX_NATIVE=OFF` so the package does not depend on the CPU it was built on. Packages are unsigned; `SigLevel = Optional TrustAll` is fine for a local or test repository. For a public repository, sign the database and packages with GPG and require signatures in `pacman.conf`.
 
 To publish the repository from this Git repository, upload the contents of `repo/` to a static host or a `gh-pages` branch and use the published URL as `Server`. The `repo/` directory is a build artifact and is ignored by Git.
+
+The included `.github/workflows/pacman-repo.yml` does this automatically: on every push to `main` it builds the package in an Arch Linux container, creates `repo/`, and deploys it to GitHub Pages. Enable **Settings → Pages → Source: GitHub Actions** once, then use:
+
+```ini
+[flux]
+SigLevel = Optional TrustAll
+Server = https://<user>.github.io/Flux/
+```
 
 ## One version for the app, tags, and packages
 
