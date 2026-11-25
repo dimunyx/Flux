@@ -6,18 +6,31 @@
 #include "main.hpp"
 
 int main(int argc, char* argv[]) {
-  if (argc == 2 && std::string_view(argv[1]) == "--version") {
-    std::cout << "Flux " << FLUX_VERSION << '\n';
-    return 0;
+  bool force = false;
+  for (int index = 1; index < argc; ++index) {
+    const std::string_view argument(argv[index]);
+    if (argument == "--version") {
+      std::cout << "Flux " << FLUX_VERSION << '\n';
+      return 0;
+    }
+    if (argument == "--force") {
+      force = true;
+    }
   }
 
   try {
-    std::string distro;
-    const bool osDetected = getOS(distro) == 0;
-    if (osDetected) {
-      static_cast<void>(getPM(distro));
+    // --force starts the interface without package management, regardless of
+    // the distribution. Without it, an unsupported distribution is an error.
+    bool pacmanSupported = false;
+    if (!force) {
+      std::string distro;
+      if (getOS(distro) != 0 || getPM(distro) != 0) {
+        std::cerr << "Flux: unsupported distribution. "
+                     "Start with --force to run without package management.\n";
+        return 1;
+      }
+      pacmanSupported = distro == "arch";
     }
-    const bool pacmanSupported = osDetected && distro == "arch";
 
     core::Window window(1280, 720, "Flux " FLUX_VERSION);
     render::Renderer renderer;

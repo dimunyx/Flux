@@ -52,6 +52,14 @@ The executable prints its embedded version with:
 ./build/bin/flux --version
 ```
 
+`--force` starts the interface without package management, regardless of the detected distribution:
+
+```sh
+./build/bin/flux --force
+```
+
+Without `--force`, Flux exits with an error on a distribution whose package manager is not supported.
+
 The default build uses Release mode. Set `CXX` to select a compiler, for example `CXX=g++ just build`. Set `BUILD_TYPE=Debug` to build a debug configuration with `just`.
 
 ## Install with Nix
