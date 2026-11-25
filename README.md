@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/assets/Flux.png" alt="Icon description" width="128" height="128">
+  <img src="src/assets/Flux.png" alt="Icon description" width="256" height="256">
 </p>
 <p style="text-align: center; font-weight: 800;">
   Flux
