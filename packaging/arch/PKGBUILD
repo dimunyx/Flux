@@ -2,7 +2,7 @@
 pkgname=flux
 # The root VERSION file is the single source of truth for the version.
 pkgver=$(<"$startdir/../../VERSION")
-pkgrel=1
+pkgrel=2
 pkgdesc="A lightweight Linux software center"
 arch=('x86_64' 'aarch64')
 url="https://github.com/dimunyx/Flux"
