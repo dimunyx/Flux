@@ -1,4 +1,9 @@
-# Flux
+<p align="center">
+  <img src="src/assets/Flux.png" alt="Icon description" width="128" height="128">
+</p>
+<p style="text-align: center; font-weight: 800;">
+  Flux
+</p>
 
 Flux is a lightweight Linux software center with a native desktop interface. It brings package search and common package actions into one small application, with a focus on a clean, responsive UI.
 
@@ -188,3 +193,4 @@ just tag         # Create the v<VERSION> annotated Git tag
 ## License
 
 Flux is licensed under the GNU General Public License, version 3. See [`LICENSE`](LICENSE).
+
