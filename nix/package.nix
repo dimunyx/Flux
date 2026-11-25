@@ -6,6 +6,7 @@
   pkg-config,
   glfw,
   freetype,
+  fontconfig,
   libpng,
   libepoxy,
   libGL,
@@ -35,6 +36,7 @@ stdenv.mkDerivation {
   buildInputs = [
     glfw
     freetype
+    fontconfig
     libpng
     libepoxy
     libGL

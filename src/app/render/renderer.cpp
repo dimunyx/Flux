@@ -7,16 +7,16 @@
 
 #include <png.h>
 
+#include <fontconfig/fontconfig.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -343,27 +343,48 @@ struct Renderer::Impl {
     cleanup();
   }
 
+  static std::string systemFontPath() {
+    if (FcInit() == 0) {
+      return {};
+    }
+
+    FcPattern* pattern = FcPatternCreate();
+    if (pattern == nullptr) {
+      return {};
+    }
+    FcPatternAddString(pattern, FC_FAMILY,
+                       reinterpret_cast<const FcChar8*>("sans-serif"));
+    FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
+    FcDefaultSubstitute(pattern);
+
+    FcResult result = FcResultNoMatch;
+    FcPattern* match = FcFontMatch(nullptr, pattern, &result);
+    std::string path;
+    if (match != nullptr) {
+      FcChar8* file = nullptr;
+      if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
+        path = reinterpret_cast<const char*>(file);
+      }
+      FcPatternDestroy(match);
+    }
+    FcPatternDestroy(pattern);
+    return path;
+  }
+
   void loadFont() {
     if (FT_Init_FreeType(&library) != 0) {
       throw std::runtime_error("Failed to initialize FreeType");
     }
 
-    constexpr std::array<const char*, 2> fontPaths{
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
-    FT_Error faceError = 1;
-    for (const char* path : fontPaths) {
-      faceError = FT_New_Face(library, path, 0, &face);
-      if (faceError == 0) {
-        currentFontPath = path;
-        break;
-      }
-    }
-    if (faceError != 0) {
+    // Resolve the desktop's configured sans-serif font through fontconfig,
+    // which is what GTK and Qt use for system fonts.
+    const std::string path = systemFontPath();
+    if (path.empty() || FT_New_Face(library, path.c_str(), 0, &face) != 0) {
       throw std::runtime_error(
-          "Could not load DejaVu Sans; install the ttf-dejavu font package");
+          "Could not load a system font; install fontconfig and a font package");
     }
 
+    currentFontPath = path;
     currentFontFamily = face->family_name != nullptr ? face->family_name : "Unknown";
     currentFontStyle = face->style_name != nullptr ? face->style_name : "Regular";
     setFontSize(kDefaultFontSize);
@@ -534,58 +555,54 @@ struct Renderer::Impl {
       return availableFontFaces;
     }
 
-    std::vector<std::filesystem::path> roots{
-        "/usr/share/fonts", "/usr/local/share/fonts"};
-    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-      roots.emplace_back(std::filesystem::path(home) / ".fonts");
-      roots.emplace_back(std::filesystem::path(home) / ".local/share/fonts");
-    }
-    if (const char* dataHome = std::getenv("XDG_DATA_HOME");
-        dataHome != nullptr && dataHome[0] != '\0') {
-      roots.emplace_back(std::filesystem::path(dataHome) / "fonts");
-    }
-
     std::set<std::string> seenPaths;
     availableFontFaces.clear();
-    for (const std::filesystem::path& root : roots) {
-      std::error_code error;
-      std::filesystem::recursive_directory_iterator iterator(
-          root, std::filesystem::directory_options::skip_permission_denied, error);
-      const std::filesystem::recursive_directory_iterator end;
-      while (iterator != end) {
-        const std::filesystem::directory_entry entry = *iterator;
-        iterator.increment(error);
-        if (error) {
-          error.clear();
-          iterator = end;
-        }
-        std::error_code statusError;
-        if (!entry.is_regular_file(statusError) || statusError) {
-          continue;
-        }
-        const std::string extension = entry.path().extension().string();
-        if (extension != ".ttf" && extension != ".otf" && extension != ".ttc" &&
-            extension != ".TTF" && extension != ".OTF" && extension != ".TTC") {
-          continue;
-        }
-        const std::string path = entry.path().string();
-        if (!seenPaths.insert(path).second) {
-          continue;
-        }
-
-        FT_Face candidate = nullptr;
-        if (FT_New_Face(library, path.c_str(), 0, &candidate) != 0) {
-          continue;
-        }
-        if (candidate->family_name != nullptr) {
+    if (FcInit() != 0) {
+      FcPattern* pattern = FcPatternCreate();
+      FcObjectSet* objects =
+          FcObjectSetBuild(FC_FILE, FC_FAMILY, FC_STYLE, nullptr);
+      FcFontSet* fontSet =
+          pattern != nullptr && objects != nullptr
+              ? FcFontList(nullptr, pattern, objects)
+              : nullptr;
+      if (fontSet != nullptr) {
+        for (int index = 0; index < fontSet->nfont; ++index) {
+          FcPattern* font = fontSet->fonts[index];
+          FcChar8* file = nullptr;
+          FcChar8* family = nullptr;
+          FcChar8* style = nullptr;
+          if (FcPatternGetString(font, FC_FILE, 0, &file) != FcResultMatch ||
+              FcPatternGetString(font, FC_FAMILY, 0, &family) != FcResultMatch) {
+            continue;
+          }
+          const std::string path = reinterpret_cast<const char*>(file);
+          const std::string extension =
+              std::filesystem::path(path).extension().string();
+          if (extension != ".ttf" && extension != ".otf" &&
+              extension != ".ttc" && extension != ".TTF" &&
+              extension != ".OTF" && extension != ".TTC") {
+            continue;
+          }
+          if (!seenPaths.insert(path).second) {
+            continue;
+          }
+          const std::string styleName =
+              FcPatternGetString(font, FC_STYLE, 0, &style) == FcResultMatch
+                  ? reinterpret_cast<const char*>(style)
+                  : "Regular";
           availableFontFaces.push_back(
-              {path, candidate->family_name,
-               candidate->style_name != nullptr ? candidate->style_name : "Regular"});
+              {path, reinterpret_cast<const char*>(family), styleName});
         }
-        FT_Done_Face(candidate);
+        FcFontSetDestroy(fontSet);
+      }
+      if (objects != nullptr) {
+        FcObjectSetDestroy(objects);
+      }
+      if (pattern != nullptr) {
+        FcPatternDestroy(pattern);
       }
     }
-    if (seenPaths.insert(currentFontPath).second) {
+    if (!currentFontPath.empty() && seenPaths.insert(currentFontPath).second) {
       availableFontFaces.push_back(
           {currentFontPath, currentFontFamily, currentFontStyle});
     }
@@ -950,6 +967,13 @@ std::vector<FontFace> Renderer::fontFaces() const {
 
 void Renderer::setFontFace(const std::string& path) {
   impl_->setFontFace(path);
+}
+
+void Renderer::useSystemFont() {
+  const std::string path = Impl::systemFontPath();
+  if (!path.empty()) {
+    impl_->setFontFace(path);
+  }
 }
 
 float Renderer::measureText(std::string_view text) const {

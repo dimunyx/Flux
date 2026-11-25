@@ -57,6 +57,7 @@ target_include_directories(flux PRIVATE
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.3 REQUIRED)
 find_package(Freetype REQUIRED)
+find_package(Fontconfig REQUIRED)
 find_package(PNG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
@@ -64,6 +65,7 @@ target_link_libraries(flux PRIVATE
     OpenGL::GL
     glfw
     Freetype::Freetype
+    Fontconfig::Fontconfig
     PNG::PNG
     PkgConfig::EPOXY
 )

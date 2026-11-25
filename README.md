@@ -16,7 +16,7 @@ Flux is a lightweight Linux software center with a native desktop interface. It 
 
 - Linux with OpenGL 4.6 support.
 - CMake 3.28 or newer and a C++26 compiler. Clang is recommended; GCC is also supported.
-- OpenGL development files, GLFW 3.3+, FreeType, libpng, libepoxy, and pkg-config.
+- OpenGL development files, GLFW 3.3+, FreeType, Fontconfig, libpng, libepoxy, and pkg-config.
 - For package operations on Arch Linux: `pacman` and Polkit (`pkexec`).
 - Optional: [`just`](https://just.systems/) for the helper commands below.
 - Optional: [Nix](https://nixos.org/) with flakes enabled, to build or install the app without managing the dependencies above.
@@ -24,10 +24,12 @@ Flux is a lightweight Linux software center with a native desktop interface. It 
 On Arch Linux, the build dependencies can be installed with:
 
 ```sh
-sudo pacman -S --needed base-devel cmake clang glfw-x11 freetype2 libpng libepoxy pkgconf
+sudo pacman -S --needed base-devel cmake clang glfw-x11 freetype2 fontconfig libpng libepoxy pkgconf
 ```
 
 The GLFW package name may differ if you use a different window-system backend.
+
+Flux renders text with the system sans-serif font resolved through Fontconfig, the same mechanism GTK and Qt use. The font can be changed in **Settings → Appearance**, where **System default** follows the desktop font; until a font is chosen, the system font is used.
 
 ## Build and run
 

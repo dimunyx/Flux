@@ -65,6 +65,7 @@ class Renderer {
   std::string fontStyle() const;
   std::vector<FontFace> fontFaces() const;
   void setFontFace(const std::string& path);
+  void useSystemFont();
   float measureText(std::string_view text) const;
   void draw(int width, int height, std::span<const RectItem> rectangles,
             std::span<const TextItem> text,

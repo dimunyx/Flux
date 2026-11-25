@@ -804,10 +804,9 @@ struct PackageView::Impl {
         renderer.setFontFace(settings.fontPath);
       } catch (const std::exception& error) {
         settingsStatus = std::string("Could not load saved font: ") + error.what();
-        settings.fontPath = renderer.fontFacePath();
+        // Fall back to the system font instead of pinning a replacement path.
+        settings.fontPath.clear();
       }
-    } else {
-      settings.fontPath = renderer.fontFacePath();
     }
     if (std::none_of(fontFaces.begin(), fontFaces.end(),
                      [this](const render::FontFace& font) {
@@ -1588,6 +1587,16 @@ struct PackageView::Impl {
   }
 
   void selectFontFace(const render::FontFace& font) {
+    if (font.path.empty()) {
+      try {
+        renderer.useSystemFont();
+        settings.fontPath.clear();
+        persistSettings();
+      } catch (const std::exception& error) {
+        settingsStatus = std::string("Could not change font: ") + error.what();
+      }
+      return;
+    }
     if (font.path == renderer.fontFacePath()) {
       return;
     }
@@ -1613,9 +1622,13 @@ struct PackageView::Impl {
     const auto current = std::find_if(
         dropdownChoices.begin(), dropdownChoices.end(),
         [this](const render::FontFace& font) {
-          return dropdownKind == DropdownKind::fontFamily
-                     ? font.family == renderer.fontFamily()
-                     : font.path == renderer.fontFacePath();
+          if (dropdownKind == DropdownKind::fontFamily) {
+            if (settings.fontPath.empty()) {
+              return font.path.empty();
+            }
+            return !font.path.empty() && font.family == renderer.fontFamily();
+          }
+          return font.path == renderer.fontFacePath();
         });
     return current == dropdownChoices.end()
                ? 0
@@ -1632,9 +1645,14 @@ struct PackageView::Impl {
     if (dropdownKind == DropdownKind::theme) {
       return dropdownThemeChoices[index] == settings.themeMode;
     }
-    return dropdownKind == DropdownKind::fontFamily
-               ? dropdownChoices[index].family == renderer.fontFamily()
-               : dropdownChoices[index].path == renderer.fontFacePath();
+    if (dropdownKind == DropdownKind::fontFamily) {
+      if (settings.fontPath.empty()) {
+        return dropdownChoices[index].path.empty();
+      }
+      return !dropdownChoices[index].path.empty() &&
+             dropdownChoices[index].family == renderer.fontFamily();
+    }
+    return dropdownChoices[index].path == renderer.fontFacePath();
   }
 
   std::string dropdownChoiceLabel(std::size_t index) const {
@@ -1662,6 +1680,7 @@ struct PackageView::Impl {
     dropdownChoices.clear();
     dropdownThemeChoices.clear();
     if (kind == DropdownKind::fontFamily) {
+      dropdownChoices.push_back({"", "System default", ""});
       for (const std::string& family : fontFamilies) {
         const auto regular = std::find_if(
             fontFaces.begin(), fontFaces.end(),

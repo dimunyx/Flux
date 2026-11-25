@@ -54,6 +54,7 @@
               just
               glfw
               freetype
+              fontconfig
               libpng
               libepoxy
               libGL
