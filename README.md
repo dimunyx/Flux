@@ -16,6 +16,7 @@ Flux is a lightweight Linux software center with a native desktop interface. It 
 - Clear the pacman or DNF package cache after confirmation.
 - Choose the interface theme and font, adjust font size, and control descriptions, animation, and scrolling behavior.
 - Use keyboard navigation and a searchable, animated interface.
+- Build native packages for Arch Linux (`.pkg.tar.zst`) and Fedora (`.rpm`).
 
 ## Requirements
 
@@ -181,13 +182,40 @@ The `PKGBUILD` sets `-DFLUX_NATIVE=OFF` so the package does not depend on the CP
 
 To publish the repository from this Git repository, upload the contents of `repo/` to a static host or a `gh-pages` branch and use the published URL as `Server`. The `repo/` directory is a build artifact and is ignored by Git.
 
-The included `.github/workflows/pacman-repo.yml` does this automatically: on every push to `main` it builds the package in an Arch Linux container, creates `repo/`, and deploys it to GitHub Pages. Enable **Settings → Pages → Source: GitHub Actions** once, then use:
+The included `.github/workflows/pacman-repo.yml` builds the Arch and RPM repositories on every push to `main` and deploys both to GitHub Pages. Enable **Settings → Pages → Source: GitHub Actions** once, then use:
 
 ```ini
 [flux]
 SigLevel = Optional TrustAll
 Server = https://<user>.github.io/Flux/
 ```
+
+## Fedora and DNF repository
+
+Add the Flux repository configuration:
+
+```sh
+sudo tee /etc/yum.repos.d/flux.repo >/dev/null <<'EOF'
+[flux]
+name=Flux packages
+baseurl=https://dimunyx.github.io/Flux/rpm/
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0
+EOF
+```
+
+Then install Flux and receive updates through DNF:
+
+```sh
+sudo dnf makecache --refresh
+sudo dnf install flux
+sudo dnf upgrade flux
+```
+
+This RPM repository can also be used by other distributions compatible with DNF and RPM. Packages and repository metadata are published automatically to `https://dimunyx.github.io/Flux/rpm/` by GitHub Actions. Packages are currently unsigned, so DNF package and repository signature checks are disabled in the example configuration.
+
+To build an RPM locally instead, install `rpm-build` and run `just rpm`. It writes the package to `packaging/rpm/`.
 
 ## One version for the app, tags, and packages
 
@@ -213,6 +241,7 @@ just package     # Build a versioned .tar.gz package
 just run         # Run the Release executable
 just nix         # Build the package with Nix (requires flakes)
 just pkg         # Build the Arch Linux package with makepkg
+just rpm         # Build the Fedora-compatible RPM (requires rpm-build)
 just repo        # Build the package and refresh repo/ (pacman repository)
 just serve       # Serve repo/ over HTTP on port 8080
 just fmt         # Format C++ source with clang-format

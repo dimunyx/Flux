@@ -1,4 +1,4 @@
-name: pacman repository
+name: Package repositories
 
 on:
   push:
@@ -35,6 +35,30 @@ jobs:
             cp /src/repo/flux.db.tar.gz /src/repo/flux.db
             cp /src/repo/flux.files.tar.gz /src/repo/flux.files
           '
+
+      - name: Build the Fedora RPM repository
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src fedora:latest bash -euo pipefail -c '
+            dnf install -y clang cmake make rpm-build createrepo_c glfw-devel \
+              freetype-devel fontconfig-devel libpng-devel libepoxy-devel \
+              libglvnd-devel pkgconf-pkg-config
+            cmake -S . -B build/rpm -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr \
+              -DFLUX_NATIVE=OFF
+            cmake --build build/rpm --parallel
+            mkdir -p packaging/rpm /src/repo/rpm
+            cpack -G RPM --config build/rpm/CPackConfig.cmake -B packaging/rpm
+            cp packaging/rpm/*.rpm /src/repo/rpm/
+            createrepo_c /src/repo/rpm
+          '
+
+      - name: Upload RPM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: flux-rpm-${{ github.sha }}
+          path: packaging/rpm/*.rpm
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

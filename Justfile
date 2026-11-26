@@ -22,6 +22,13 @@ nix:
 pkg:
     cd packaging/arch && makepkg -f
 
+# Build a Fedora-compatible RPM with CPack (requires rpm-build).
+rpm type=build_type:
+    cmake -S . -B build/Makefiles/{{type}} -G "Unix Makefiles" -DCMAKE_BUILD_TYPE={{type}} -DCMAKE_CXX_COMPILER={{cxx}} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build/Makefiles/{{type}} --parallel
+    mkdir -p packaging/rpm
+    cpack -G RPM --config build/Makefiles/{{type}}/CPackConfig.cmake -B packaging/rpm
+
 # Build the Arch package and refresh the local pacman repository in repo/.
 repo: pkg
     mkdir -p repo
