@@ -1,0 +1,50 @@
+name: Tag version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create version tag
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must contain a semantic version like 0.1.1; got: $version" >&2
+            exit 1
+          fi
+
+          previous=""
+          if git rev-parse "$COMMIT_SHA^" >/dev/null 2>&1; then
+            previous="$(git show "$COMMIT_SHA^:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+          fi
+          if [[ "$version" == "$previous" ]]; then
+            echo "VERSION did not change; no tag is needed."
+            exit 0
+          fi
+
+          if git show-ref --verify --quiet "refs/tags/$version"; then
+            echo "Tag $version already exists; refusing to replace it." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$version" -m "Release $version"
+          git push origin "refs/tags/$version"
