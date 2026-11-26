@@ -120,7 +120,6 @@ Install and update Flux:
 ```sh
 sudo dnf makecache --refresh
 sudo dnf install flux
-sudo dnf upgrade flux
 ```
 
 The repository is published automatically through GitHub Actions. It also supports other DNF/RPM-compatible distributions. Packages are currently unsigned, so signature checks are disabled in the example configuration.
@@ -134,71 +133,16 @@ just rpm
 The package is written to `packaging/rpm/`.
 
 ## Arch Linux package and repository
-
-Build a package from the current checkout:
-
-```sh
-just pkg
-```
-
-Or build and install it directly:
-
-```sh
-cd packaging/arch
-makepkg -si
-```
-
-To create a local pacman repository:
-
-```sh
-just repo
-```
-
-Or manually:
-
-```sh
-mkdir -p repo
-cp packaging/arch/*.pkg.tar.zst repo/
-repo-add repo/flux.db.tar.gz repo/flux-*.pkg.tar.zst
-```
-
-Configure pacman to use the local repository:
-
-```ini
+1. Open `/etc/pacman.conf` with your editor.
+2. Put it:  
+```confini  
 [flux]
 SigLevel = Optional TrustAll
-Server = file:///home/you/dev/Flux/repo
+Server = https://dimunyx.github.io/Flux/  
 ```
+3. Update package databases with `sudo pacman -Sy`.
+4. Install `Flux` with `sudo pacman -S flux`.
 
-Alternatively, serve it over HTTP:
-
-```sh
-just serve
-```
-
-```ini
-[flux]
-SigLevel = Optional TrustAll
-Server = http://localhost:8080
-```
-
-Then install Flux:
-
-```sh
-sudo pacman -Syu flux
-```
-
-The Arch package uses `-DFLUX_NATIVE=OFF` to avoid CPU-specific builds. Packages are unsigned; use GPG signatures for public repositories.
-
-The `.github/workflows/pacman-repo.yml` workflow builds Arch and RPM repositories on pushes to `main` and deploys them to GitHub Pages. Enable **Settings → Pages → Source: GitHub Actions** to publish them.
-
-The published Arch repository can be added with:
-
-```ini
-[flux]
-SigLevel = Optional TrustAll
-Server = https://<user>.github.io/Flux/
-```
 
 ## Localization and settings
 
