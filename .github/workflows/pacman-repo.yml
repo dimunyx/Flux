@@ -24,7 +24,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src archlinux:base-devel bash -euo pipefail -c '
             pacman -Syu --noconfirm --needed \
-              cmake ninja clang pkgconf glfw freetype2 fontconfig libpng libepoxy libglvnd
+              cmake ninja clang pkgconf glfw freetype2 fontconfig libpng librsvg libepoxy libglvnd
             useradd -m builder
             chown -R builder:builder /src
             su builder -c "cd /src/packaging/arch && makepkg -f --noconfirm"
@@ -40,7 +40,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src fedora:latest bash -euo pipefail -c '
             dnf install -y clang cmake make rpm-build createrepo_c glfw-devel \
-              freetype-devel fontconfig-devel libpng-devel libepoxy-devel \
+              freetype-devel fontconfig-devel libpng-devel librsvg2-devel libepoxy-devel \
               libglvnd-devel pkgconf-pkg-config
             cmake -S . -B build/rpm -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr \
