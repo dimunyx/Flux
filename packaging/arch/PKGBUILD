@@ -7,7 +7,7 @@ pkgdesc="A lightweight Linux software center"
 arch=('x86_64' 'aarch64')
 url="https://github.com/dimunyx/Flux"
 license=('GPL-3.0-only')
-depends=('glfw' 'freetype2' 'fontconfig' 'libpng' 'libepoxy' 'libglvnd')
+depends=('glfw' 'freetype2' 'fontconfig' 'libpng' 'librsvg' 'libepoxy' 'libglvnd')
 makedepends=('cmake' 'ninja' 'clang' 'pkgconf')
 optdepends=(
   'pacman: package management on Arch Linux'

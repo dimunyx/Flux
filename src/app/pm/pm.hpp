@@ -20,8 +20,14 @@ Manager getPM(std::string_view distro, std::string_view idLike = {});
 std::vector<Package> searchPackages(
     Manager manager, std::string_view query,
     const std::function<void(float)>& reportProgress = {});
+std::vector<Package> listUpdates(
+    Manager manager, const std::function<void(float)>& reportProgress = {});
+std::vector<Package> listInstalled(
+    Manager manager, const std::function<void(float)>& reportProgress = {});
 void installPackage(Manager manager, std::string_view packageName);
 void removePackage(Manager manager, std::string_view packageName);
 void clearPackageCache(Manager manager);
+void updateAllPackages(Manager manager);
+void updatePackage(Manager manager, std::string_view packageName);
 
 }  // namespace pm

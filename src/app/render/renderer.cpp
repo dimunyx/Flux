@@ -1,6 +1,8 @@
 #include "render/renderer.hpp"
 
 #include <epoxy/gl.h>
+#include <cairo.h>
+#include <librsvg/rsvg.h>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -13,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <set>
 #include <stdexcept>
@@ -28,6 +31,7 @@ namespace {
 constexpr int kMinimumFontSize = 12;
 constexpr int kMaximumFontSize = 30;
 constexpr int kDefaultFontSize = 18;
+constexpr int kFontRasterScale = 4;
 
 constexpr char kVertexShader[] = R"(
   #version 460 core
@@ -54,8 +58,11 @@ constexpr char kFragmentShader[] = R"(
   uniform float textOpacity;
 
   void main() {
-    float alpha = texture(glyphTexture, texCoords).r;
-    fragmentColor = vec4(textColor, alpha * textOpacity);
+    float coverage = texture(glyphTexture, texCoords).r;
+    vec3 low = textColor / 12.92;
+    vec3 high = pow((textColor + 0.055) / 1.055, vec3(2.4));
+    vec3 linearColor = mix(high, low, lessThanEqual(textColor, vec3(0.04045)));
+    fragmentColor = vec4(linearColor, coverage * textOpacity);
   }
 )";
 
@@ -66,12 +73,17 @@ constexpr char kImageFragmentShader[] = R"(
   uniform sampler2D imageTexture;
   uniform float imageOpacity;
   uniform float imageCircular;
+  uniform vec3 imageTint;
+  uniform float imageThemed;
 
   void main() {
     if (imageCircular > 0.5 && distance(texCoords, vec2(0.5)) > 0.5) {
       discard;
     }
     vec4 color = texture(imageTexture, texCoords);
+    if (imageThemed > 0.5) {
+      color.rgb = imageTint;
+    }
     color.a *= imageOpacity;
     fragmentColor = color;
   }
@@ -283,8 +295,8 @@ struct Renderer::Impl {
     FT_UInt glyphIndex = 0;
     int width = 0;
     int height = 0;
-    int bearingX = 0;
-    int bearingY = 0;
+    float bearingX = 0.0F;
+    float bearingY = 0.0F;
     float advance = 0.0F;
   };
 
@@ -311,6 +323,8 @@ struct Renderer::Impl {
   GLint imageTextureLocation = -1;
   GLint imageOpacityLocation = -1;
   GLint imageCircularLocation = -1;
+  GLint imageTintLocation = -1;
+  GLint imageThemedLocation = -1;
   GLint rectangleViewportLocation = -1;
   GLint rectangleSizeLocation = -1;
   GLint rectangleRadiusLocation = -1;
@@ -394,7 +408,10 @@ struct Renderer::Impl {
 
   Character rasterizeCharacter(char32_t codepoint) const {
     FT_ULong loadedCodepoint = static_cast<FT_ULong>(codepoint);
-    constexpr FT_Int32 loadFlags = FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT;
+    // Avoid small-size grid fitting, then downsample the oversampled glyph
+    // texture through its mip chain for smoother edges.
+    constexpr FT_Int32 loadFlags =
+        FT_LOAD_RENDER | FT_LOAD_NO_HINTING | FT_LOAD_NO_AUTOHINT;
     if (FT_Load_Char(face, loadedCodepoint, loadFlags) != 0) {
       loadedCodepoint = static_cast<FT_ULong>(U'?');
       if (FT_Load_Char(face, loadedCodepoint, loadFlags) != 0) {
@@ -407,9 +424,12 @@ struct Renderer::Impl {
         .glyphIndex = FT_Get_Char_Index(face, loadedCodepoint),
         .width = static_cast<int>(bitmap.width),
         .height = static_cast<int>(bitmap.rows),
-        .bearingX = face->glyph->bitmap_left,
-        .bearingY = face->glyph->bitmap_top,
-        .advance = static_cast<float>(face->glyph->advance.x) / 64.0F};
+        .bearingX = static_cast<float>(face->glyph->bitmap_left) /
+                    static_cast<float>(kFontRasterScale),
+        .bearingY = static_cast<float>(face->glyph->bitmap_top) /
+                    static_cast<float>(kFontRasterScale),
+        .advance = static_cast<float>(face->glyph->advance.x) /
+                   (64.0F * static_cast<float>(kFontRasterScale))};
 
     if (bitmap.width <= 0 || bitmap.rows <= 0) {
       return character;
@@ -417,12 +437,13 @@ struct Renderer::Impl {
 
     std::vector<unsigned char> pixels(
         static_cast<std::size_t>(bitmap.width) * bitmap.rows);
+    const int pitch = bitmap.pitch >= 0 ? bitmap.pitch : -bitmap.pitch;
     for (int row = 0; row < static_cast<int>(bitmap.rows); ++row) {
       const int sourceRow = bitmap.pitch >= 0
                                 ? row
                                 : static_cast<int>(bitmap.rows) - 1 - row;
       const unsigned char* source =
-          bitmap.buffer + static_cast<std::ptrdiff_t>(sourceRow) * bitmap.pitch;
+          bitmap.buffer + static_cast<std::ptrdiff_t>(sourceRow) * pitch;
       unsigned char* destination =
           pixels.data() + static_cast<std::size_t>(row) * bitmap.width;
       for (int column = 0; column < static_cast<int>(bitmap.width); ++column) {
@@ -447,9 +468,11 @@ struct Renderer::Impl {
     glBindTexture(GL_TEXTURE_2D, character.texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, character.width, character.height, 0,
                  GL_RED, GL_UNSIGNED_BYTE, pixels.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     return character;
   }
@@ -486,32 +509,110 @@ struct Renderer::Impl {
   }
 
   ImageTexture loadImageTexture(const std::string& path) const {
-    struct ImageGuard {
-      png_image image{};
-      ~ImageGuard() { png_image_free(&image); }
-    };
+    int imageWidth = 0;
+    int imageHeight = 0;
+    std::vector<unsigned char> pixels;
+    if (std::filesystem::path(path).extension() == ".svg") {
+      GError* error = nullptr;
+      RsvgHandle* handle = rsvg_handle_new_from_file(path.c_str(), &error);
+      if (handle == nullptr) {
+        const std::string detail = error != nullptr ? error->message : "unknown error";
+        if (error != nullptr) g_error_free(error);
+        throw std::runtime_error("Could not read SVG asset '" + path + "': " + detail);
+      }
 
-    ImageGuard guard;
-    png_image& pngImage = guard.image;
-    pngImage.version = PNG_IMAGE_VERSION;
-    if (png_image_begin_read_from_file(&pngImage, path.c_str()) == 0) {
-      const std::string error = pngImage.message;
-      throw std::runtime_error("Could not read image asset '" + path + "': " + error);
-    }
+      double intrinsicWidth = 0.0;
+      double intrinsicHeight = 0.0;
+      if (!rsvg_handle_get_intrinsic_size_in_pixels(
+              handle, &intrinsicWidth, &intrinsicHeight)) {
+        intrinsicWidth = 128.0;
+        intrinsicHeight = 128.0;
+      }
+      if (!std::isfinite(intrinsicWidth) || !std::isfinite(intrinsicHeight) ||
+          intrinsicWidth <= 0.0 || intrinsicHeight <= 0.0 ||
+          intrinsicWidth > 4096.0 || intrinsicHeight > 4096.0) {
+        g_object_unref(handle);
+        throw std::runtime_error("SVG asset has invalid dimensions: " + path);
+      }
 
-    if (pngImage.width == 0 || pngImage.height == 0 || pngImage.width > 4096 ||
-        pngImage.height > 4096) {
-      throw std::runtime_error("Image asset has invalid dimensions: " + path);
-    }
+      imageWidth = std::max(1, static_cast<int>(std::ceil(intrinsicWidth)));
+      imageHeight = std::max(1, static_cast<int>(std::ceil(intrinsicHeight)));
+      cairo_surface_t* surface = cairo_image_surface_create(
+          CAIRO_FORMAT_ARGB32, imageWidth, imageHeight);
+      if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        const std::string detail = cairo_status_to_string(cairo_surface_status(surface));
+        cairo_surface_destroy(surface);
+        g_object_unref(handle);
+        throw std::runtime_error("Could not allocate SVG surface for '" + path +
+                                 "': " + detail);
+      }
+      cairo_t* context = cairo_create(surface);
+      const RsvgRectangle viewport{0.0, 0.0,
+                                   static_cast<double>(imageWidth),
+                                   static_cast<double>(imageHeight)};
+      const gboolean rendered =
+          rsvg_handle_render_document(handle, context, &viewport, &error);
+      const cairo_status_t contextStatus = cairo_status(context);
+      cairo_destroy(context);
+      g_object_unref(handle);
+      if (!rendered || contextStatus != CAIRO_STATUS_SUCCESS) {
+        std::string detail = error != nullptr ? error->message
+                                              : cairo_status_to_string(contextStatus);
+        if (error != nullptr) g_error_free(error);
+        cairo_surface_destroy(surface);
+        throw std::runtime_error("Could not render SVG asset '" + path + "': " + detail);
+      }
+      if (error != nullptr) g_error_free(error);
 
-    const int imageWidth = static_cast<int>(pngImage.width);
-    const int imageHeight = static_cast<int>(pngImage.height);
-    pngImage.format = PNG_FORMAT_RGBA;
-    std::vector<png_byte> pixels(
-        static_cast<std::size_t>(PNG_IMAGE_SIZE(pngImage)));
-    if (png_image_finish_read(&pngImage, nullptr, pixels.data(), 0, nullptr) == 0) {
-      const std::string error = pngImage.message;
-      throw std::runtime_error("Could not decode image asset '" + path + "': " + error);
+      cairo_surface_flush(surface);
+      const auto* source = reinterpret_cast<const std::uint32_t*>(
+          cairo_image_surface_get_data(surface));
+      const int stride = cairo_image_surface_get_stride(surface) /
+                         static_cast<int>(sizeof(std::uint32_t));
+      pixels.resize(static_cast<std::size_t>(imageWidth) * imageHeight * 4U);
+      for (int y = 0; y < imageHeight; ++y) {
+        for (int x = 0; x < imageWidth; ++x) {
+          const std::uint32_t argb = source[y * stride + x];
+          const unsigned int alpha = (argb >> 24U) & 0xFFU;
+          const auto unpremultiply = [alpha](unsigned int channel) {
+            return alpha == 0U ? 0U : std::min(255U, channel * 255U / alpha);
+          };
+          const std::size_t offset =
+              (static_cast<std::size_t>(y) * imageWidth + x) * 4U;
+          pixels[offset] = static_cast<unsigned char>(
+              unpremultiply((argb >> 16U) & 0xFFU));
+          pixels[offset + 1U] = static_cast<unsigned char>(
+              unpremultiply((argb >> 8U) & 0xFFU));
+          pixels[offset + 2U] = static_cast<unsigned char>(
+              unpremultiply(argb & 0xFFU));
+          pixels[offset + 3U] = static_cast<unsigned char>(alpha);
+        }
+      }
+      cairo_surface_destroy(surface);
+    } else {
+      struct ImageGuard {
+        png_image image{};
+        ~ImageGuard() { png_image_free(&image); }
+      };
+      ImageGuard guard;
+      png_image& pngImage = guard.image;
+      pngImage.version = PNG_IMAGE_VERSION;
+      if (png_image_begin_read_from_file(&pngImage, path.c_str()) == 0) {
+        const std::string detail = pngImage.message;
+        throw std::runtime_error("Could not read image asset '" + path + "': " + detail);
+      }
+      if (pngImage.width == 0 || pngImage.height == 0 || pngImage.width > 4096 ||
+          pngImage.height > 4096) {
+        throw std::runtime_error("Image asset has invalid dimensions: " + path);
+      }
+      imageWidth = static_cast<int>(pngImage.width);
+      imageHeight = static_cast<int>(pngImage.height);
+      pngImage.format = PNG_FORMAT_RGBA;
+      pixels.resize(static_cast<std::size_t>(PNG_IMAGE_SIZE(pngImage)));
+      if (png_image_finish_read(&pngImage, nullptr, pixels.data(), 0, nullptr) == 0) {
+        const std::string detail = pngImage.message;
+        throw std::runtime_error("Could not decode image asset '" + path + "': " + detail);
+      }
     }
 
     ImageTexture result{
@@ -543,7 +644,9 @@ struct Renderer::Impl {
     if (size == currentFontSize) {
       return;
     }
-    if (FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(size)) != 0) {
+    if (FT_Set_Pixel_Sizes(
+            face, 0,
+            static_cast<FT_UInt>(size * kFontRasterScale)) != 0) {
       throw std::runtime_error("Failed to set the font size");
     }
     clearCharacters();
@@ -559,7 +662,9 @@ struct Renderer::Impl {
     if (FT_New_Face(library, path.c_str(), 0, &newFace) != 0) {
       throw std::runtime_error("Could not load font face: " + path);
     }
-    if (FT_Set_Pixel_Sizes(newFace, 0, static_cast<FT_UInt>(currentFontSize)) != 0) {
+    if (FT_Set_Pixel_Sizes(
+            newFace, 0,
+            static_cast<FT_UInt>(currentFontSize * kFontRasterScale)) != 0) {
       FT_Done_Face(newFace);
       throw std::runtime_error("Could not set the selected font size");
     }
@@ -657,6 +762,13 @@ struct Renderer::Impl {
     return width;
   }
 
+  float baselineForCenter(float centerY) const {
+    const float scale = 64.0F * static_cast<float>(kFontRasterScale);
+    const float ascender = static_cast<float>(face->size->metrics.ascender) / scale;
+    const float descender = static_cast<float>(face->size->metrics.descender) / scale;
+    return centerY + (ascender + descender) * 0.5F;
+  }
+
   float kerning(FT_UInt previousGlyph, FT_UInt currentGlyph) const {
     if (previousGlyph == 0 || currentGlyph == 0 || !FT_HAS_KERNING(face)) {
       return 0.0F;
@@ -666,7 +778,8 @@ struct Renderer::Impl {
                        &adjustment) != 0) {
       return 0.0F;
     }
-    return static_cast<float>(adjustment.x) / 64.0F;
+    return static_cast<float>(adjustment.x) /
+           (64.0F * static_cast<float>(kFontRasterScale));
   }
 
   void createGraphicsResources() {
@@ -685,8 +798,11 @@ struct Renderer::Impl {
     imageTextureLocation = glGetUniformLocation(imageProgram, "imageTexture");
     imageOpacityLocation = glGetUniformLocation(imageProgram, "imageOpacity");
     imageCircularLocation = glGetUniformLocation(imageProgram, "imageCircular");
+    imageTintLocation = glGetUniformLocation(imageProgram, "imageTint");
+    imageThemedLocation = glGetUniformLocation(imageProgram, "imageThemed");
     if (imageViewportLocation < 0 || imageTextureLocation < 0 ||
-        imageOpacityLocation < 0 || imageCircularLocation < 0) {
+        imageOpacityLocation < 0 || imageCircularLocation < 0 ||
+        imageTintLocation < 0 || imageThemedLocation < 0) {
       throw std::runtime_error("Failed to locate image shader uniforms");
     }
 
@@ -845,6 +961,8 @@ struct Renderer::Impl {
           item.x + item.width, item.y, 1.0F, 0.0F};
       glUniform1f(imageOpacityLocation, std::clamp(item.opacity, 0.0F, 1.0F));
       glUniform1f(imageCircularLocation, item.circular ? 1.0F : 0.0F);
+      glUniform3f(imageTintLocation, item.tint[0], item.tint[1], item.tint[2]);
+      glUniform1f(imageThemedLocation, item.themed ? 1.0F : 0.0F);
       glBindTexture(GL_TEXTURE_2D, texture->second.texture);
       glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices.data());
       glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -858,6 +976,7 @@ struct Renderer::Impl {
   }
 
   void drawText(int width, int height, std::span<const TextItem> text) const {
+    glEnable(GL_FRAMEBUFFER_SRGB);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(program);
@@ -879,8 +998,9 @@ struct Renderer::Impl {
         cursorX += kerning(previousGlyph, character.glyphIndex);
         const float x = cursorX + static_cast<float>(character.bearingX);
         const float y = item.baseline - static_cast<float>(character.bearingY);
-        const float glyphWidth = static_cast<float>(character.width);
-        const float glyphHeight = static_cast<float>(character.height);
+        const float rasterScale = static_cast<float>(kFontRasterScale);
+        const float glyphWidth = static_cast<float>(character.width) / rasterScale;
+        const float glyphHeight = static_cast<float>(character.height) / rasterScale;
         if (character.texture != 0) {
           const std::array<float, 24> vertices{
               x, y, 0.0F, 0.0F, x, y + glyphHeight, 0.0F, 1.0F,
@@ -901,6 +1021,7 @@ struct Renderer::Impl {
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
     glDisable(GL_BLEND);
+    glDisable(GL_FRAMEBUFFER_SRGB);
   }
 
   void blurCurrentFramebuffer(int width, int height, float amount) const {
@@ -985,6 +1106,10 @@ Renderer::~Renderer() = default;
 
 int Renderer::fontSize() const {
   return impl_->currentFontSize;
+}
+
+float Renderer::baselineForCenter(float centerY) const {
+  return impl_->baselineForCenter(centerY);
 }
 
 void Renderer::setFontSize(int size) {

@@ -195,6 +195,50 @@ std::vector<Package> searchPacman(
   return packages;
 }
 
+std::vector<Package> listPacmanUpdates(
+    const std::function<void(float)>& reportProgress) {
+  const CommandResult result = runSuccessfulCommand({"/usr/bin/pacman", "-Qu"});
+  std::vector<Package> packages;
+  std::istringstream lines(result.output);
+  std::string name;
+  std::string installedVersion;
+  std::string arrow;
+  std::string availableVersion;
+  while (lines >> name >> installedVersion >> arrow >> availableVersion) {
+    if (arrow != "->") continue;
+    Package package;
+    package.name = std::move(name);
+    package.version = installedVersion + " → " + availableVersion;
+    package.installed = true;
+    packages.push_back(std::move(package));
+  }
+  if (reportProgress) reportProgress(1.0F);
+  return packages;
+}
+
+std::vector<Package> listPacmanInstalled(
+    const std::function<void(float)>& reportProgress) {
+  const CommandResult result = runSuccessfulCommand({"/usr/bin/pacman", "-Q"});
+  if (reportProgress) reportProgress(0.6F);
+  std::vector<Package> packages;
+  std::istringstream lines(result.output);
+  std::string name;
+  std::string version;
+  while (lines >> name >> version) {
+    Package package;
+    package.name = std::move(name);
+    package.version = std::move(version);
+    package.installed = true;
+    packages.push_back(std::move(package));
+  }
+  std::sort(packages.begin(), packages.end(),
+            [](const Package& left, const Package& right) {
+              return left.name < right.name;
+            });
+  if (reportProgress) reportProgress(1.0F);
+  return packages;
+}
+
 void installPacman(std::string_view packageName) {
   if (!validPackageName(packageName)) {
     throw std::invalid_argument("Invalid package name");
@@ -217,6 +261,21 @@ void clearPacmanCache() {
   static_cast<void>(runSuccessfulCommand(
       {"/usr/bin/pkexec", "/usr/bin/find", "/var/cache/pacman/pkg", "-mindepth", "1",
        "-maxdepth", "1", "-exec", "/usr/bin/rm", "-rf", "--", "{}", "+"}));
+}
+
+void updatePacmanPackages() {
+  static_cast<void>(runSuccessfulCommand(
+      {"/usr/bin/pkexec", "/usr/bin/pacman", "--sync", "--refresh", "--sysupgrade",
+       "--noconfirm"}));
+}
+
+void updatePacmanPackage(std::string_view packageName) {
+  if (!validPackageName(packageName)) {
+    throw std::invalid_argument("Invalid package name");
+  }
+  static_cast<void>(runSuccessfulCommand(
+      {"/usr/bin/pkexec", "/usr/bin/pacman", "--sync", "--noconfirm",
+       "--needed", "--", std::string(packageName)}));
 }
 
 }  // namespace pm

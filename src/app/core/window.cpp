@@ -12,6 +12,16 @@ Window::Window(int width, int height, const char* title) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_TRUE);
+#ifdef GLFW_X11_CLASS_NAME
+  glfwWindowHintString(GLFW_X11_CLASS_NAME, "flux");
+#endif
+#ifdef GLFW_X11_INSTANCE_NAME
+  glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "flux");
+#endif
+#ifdef GLFW_WAYLAND_APP_ID
+  glfwWindowHintString(GLFW_WAYLAND_APP_ID, "flux");
+#endif
 
   window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
   if (window_ == nullptr) {

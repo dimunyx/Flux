@@ -61,6 +61,7 @@ find_package(Fontconfig REQUIRED)
 find_package(PNG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
+pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 target_link_libraries(flux PRIVATE
     OpenGL::GL
     glfw
@@ -68,6 +69,7 @@ target_link_libraries(flux PRIVATE
     Fontconfig::Fontconfig
     PNG::PNG
     PkgConfig::EPOXY
+    PkgConfig::RSVG
 )
 target_compile_definitions(flux PRIVATE
     FLUX_ASSET_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/src/assets\"
@@ -121,9 +123,9 @@ install(TARGETS flux RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY src/assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/flux/assets)
 install(FILES src/assets/flux.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-install(FILES src/assets/Flux.png
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/512x512/apps
-    RENAME flux.png)
+install(FILES src/assets/icons/Flux.svg
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
+    RENAME flux.svg)
 
 set(CPACK_PACKAGE_NAME "flux")
 set(CPACK_PACKAGE_VENDOR "Flux contributors")

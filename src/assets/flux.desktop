@@ -75,6 +75,7 @@ Exec=flux
 Icon=flux
 Terminal=false
 StartupNotify=true
+StartupWMClass=flux
 
 Categories=System;PackageManager;
 Keywords=software;packages;package manager;install;remove;update;applications;

@@ -1,0 +1,15 @@
+{
+  "name": "Default",
+  "light": false,
+  "background": "#111318",
+  "header": "#191C22",
+  "surface": "#1D2027",
+  "elevated": "#272B33",
+  "outline": "#8D9199",
+  "primary": "#B3C5FF",
+  "primary_container": "#334A75",
+  "text": "#E2E2E9",
+  "secondary_text": "#C2C6D3",
+  "selection": "#434D63",
+  "on_primary": "#1C2F5A"
+}

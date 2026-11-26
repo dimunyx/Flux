@@ -25,6 +25,8 @@ struct ImageItem {
   float height = 0.0F;
   float opacity = 1.0F;
   bool circular = false;
+  std::array<float, 3> tint{1.0F, 1.0F, 1.0F};
+  bool themed = false;
 };
 
 struct FontFace {
@@ -59,6 +61,7 @@ class Renderer {
   Renderer& operator=(const Renderer&) = delete;
 
   int fontSize() const;
+  float baselineForCenter(float centerY) const;
   void setFontSize(int size);
   std::string fontFacePath() const;
   std::string fontFamily() const;

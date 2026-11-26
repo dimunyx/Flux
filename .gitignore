@@ -5,3 +5,4 @@
 /packaging/rpm/*.rpm
 /packaging/rpm/_CPack_Packages/
 AGENTS.md
+dump-project.sh

@@ -44,6 +44,32 @@ std::vector<Package> searchPackages(
   throw std::invalid_argument("No supported package manager is selected");
 }
 
+std::vector<Package> listUpdates(
+    Manager manager, const std::function<void(float)>& reportProgress) {
+  switch (manager) {
+    case Manager::pacman:
+      return listPacmanUpdates(reportProgress);
+    case Manager::dnf:
+      return listDnfUpdates(reportProgress);
+    case Manager::none:
+      break;
+  }
+  throw std::invalid_argument("No supported package manager is selected");
+}
+
+std::vector<Package> listInstalled(
+    Manager manager, const std::function<void(float)>& reportProgress) {
+  switch (manager) {
+    case Manager::pacman:
+      return listPacmanInstalled(reportProgress);
+    case Manager::dnf:
+      return listDnfInstalled(reportProgress);
+    case Manager::none:
+      break;
+  }
+  throw std::invalid_argument("No supported package manager is selected");
+}
+
 void installPackage(Manager manager, std::string_view packageName) {
   switch (manager) {
     case Manager::pacman:
@@ -79,6 +105,34 @@ void clearPackageCache(Manager manager) {
       return;
     case Manager::dnf:
       clearDnfCache();
+      return;
+    case Manager::none:
+      break;
+  }
+  throw std::invalid_argument("No supported package manager is selected");
+}
+
+void updateAllPackages(Manager manager) {
+  switch (manager) {
+    case Manager::pacman:
+      updatePacmanPackages();
+      return;
+    case Manager::dnf:
+      updateDnfPackages();
+      return;
+    case Manager::none:
+      break;
+  }
+  throw std::invalid_argument("No supported package manager is selected");
+}
+
+void updatePackage(Manager manager, std::string_view packageName) {
+  switch (manager) {
+    case Manager::pacman:
+      updatePacmanPackage(packageName);
+      return;
+    case Manager::dnf:
+      updateDnfPackage(packageName);
       return;
     case Manager::none:
       break;

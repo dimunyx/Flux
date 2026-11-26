@@ -1,6 +1,7 @@
 #include "ui/package_view.hpp"
 
 #include "core/window.hpp"
+#include "i18n/catalog.hpp"
 #include "pm/pm.hpp"
 #include "render/renderer.hpp"
 
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -38,20 +41,25 @@ constexpr int kMinimumFontSize = 14;
 constexpr int kMaximumFontSize = 30;
 constexpr int kDefaultFontSize = 18;
 constexpr std::size_t kMaximumQueryBytes = 256;
-constexpr std::string_view kSearchPlaceholder = "Search...";
-
 enum class ThemeMode { system, light, dark };
-enum class SettingsCategory { appearance, behavior, system };
+enum class SettingsCategory { appearance, behavior, themes, system };
 
 struct UserSettings {
   int fontSize = kDefaultFontSize;
   std::string fontPath;
+  std::string language = "system";
   ThemeMode themeMode = ThemeMode::system;
   bool compactList = false;
   bool animations = true;
   bool smoothScroll = true;
   bool clickSparks = true;
   bool showPackageDescriptions = true;
+  bool restoreLastSearch = false;
+  std::string lastSearch;
+  float cornerRadius = 16.0F;
+  float borderSize = 1.5F;
+  float iconScale = 1.0F;
+  std::string customTheme;
 };
 
 struct Bounds {
@@ -72,20 +80,108 @@ struct Palette {
   std::array<float, 3> text;
   std::array<float, 3> secondaryText;
   std::array<float, 3> selection;
+  std::array<float, 3> onPrimary;
 };
 
+constexpr std::array<float, 3> rgb(unsigned int value) {
+  return {static_cast<float>((value >> 16U) & 0xFFU) / 255.0F,
+          static_cast<float>((value >> 8U) & 0xFFU) / 255.0F,
+          static_cast<float>(value & 0xFFU) / 255.0F};
+}
+
 constexpr Palette kDarkPalette{
-    {0.067F, 0.067F, 0.106F}, {0.118F, 0.118F, 0.18F},
-    {0.141F, 0.141F, 0.212F}, {0.192F, 0.196F, 0.267F},
-    {0.424F, 0.439F, 0.525F}, {0.537F, 0.706F, 0.980F},
-    {0.192F, 0.196F, 0.267F}, {0.804F, 0.839F, 0.957F},
-    {0.729F, 0.761F, 0.871F}, {0.271F, 0.278F, 0.353F}};
+    rgb(0x111318), rgb(0x191C22), rgb(0x1D2027), rgb(0x272B33),
+    rgb(0x8D9199), rgb(0xB3C5FF), rgb(0x334A75), rgb(0xE2E2E9),
+    rgb(0xC2C6D3), rgb(0x434D63), rgb(0x1C2F5A)};
 constexpr Palette kLightPalette{
-    {0.937F, 0.945F, 0.961F}, {0.902F, 0.914F, 0.941F},
-    {0.902F, 0.914F, 0.941F}, {0.863F, 0.878F, 0.910F},
-    {0.612F, 0.627F, 0.690F}, {0.118F, 0.400F, 0.961F},
-    {0.800F, 0.816F, 0.855F}, {0.298F, 0.310F, 0.412F},
-    {0.361F, 0.373F, 0.486F}, {0.800F, 0.816F, 0.855F}};
+    rgb(0xF7F8FC), rgb(0xEFF1F8), rgb(0xF0F2F8), rgb(0xE8EAF1),
+    rgb(0x747984), rgb(0x465E91), rgb(0xD9E2FF), rgb(0x191B20),
+    rgb(0x44474F), rgb(0xD9E2FF), rgb(0xFFFFFF)};
+
+struct CustomTheme {
+  std::string path;
+  std::string name;
+  Palette palette;
+  bool light = false;
+};
+
+std::string jsonStringValue(std::string_view document, std::string_view key,
+                            std::string fallback);
+bool jsonBoolValue(std::string_view document, std::string_view key, bool fallback);
+std::filesystem::path configDirectory();
+
+std::array<float, 3> jsonColorValue(std::string_view document,
+                                   std::string_view key,
+                                   std::array<float, 3> fallback) {
+  const std::string value = jsonStringValue(document, key, {});
+  if (value.size() != 7 || value.front() != '#') return fallback;
+  try {
+    return {static_cast<float>(std::stoul(value.substr(1, 2), nullptr, 16)) / 255.0F,
+            static_cast<float>(std::stoul(value.substr(3, 2), nullptr, 16)) / 255.0F,
+            static_cast<float>(std::stoul(value.substr(5, 2), nullptr, 16)) / 255.0F};
+  } catch (...) {
+    return fallback;
+  }
+}
+
+std::vector<CustomTheme> loadCustomThemes() {
+  std::vector<CustomTheme> themes;
+  const std::filesystem::path baseDirectory = configDirectory();
+  if (baseDirectory.empty()) return themes;
+  const std::filesystem::path directory = baseDirectory / "themes";
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  if (!error) {
+    const std::filesystem::path defaultTheme = directory / "default.json";
+    if (!std::filesystem::exists(defaultTheme, error) && !error) {
+      const std::array<std::filesystem::path, 2> templates{
+          std::filesystem::path(FLUX_ASSET_DIR) / "themes" / "default.json",
+          std::filesystem::path(FLUX_INSTALL_ASSET_DIR) / "themes" / "default.json"};
+      for (const auto& source : templates) {
+        if (!std::filesystem::is_regular_file(source, error)) {
+          error.clear();
+          continue;
+        }
+        std::filesystem::copy_file(source, defaultTheme,
+                                   std::filesystem::copy_options::skip_existing,
+                                   error);
+        break;
+      }
+    }
+  }
+  error.clear();
+  if (!std::filesystem::is_directory(directory, error)) return themes;
+  for (std::filesystem::directory_iterator iterator(directory, error), end;
+       !error && iterator != end; iterator.increment(error)) {
+    if (!iterator->is_regular_file(error) || iterator->path().extension() != ".json") {
+      continue;
+    }
+    std::ifstream input(iterator->path(), std::ios::binary);
+    if (!input) continue;
+    const std::string document((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    Palette palette = kDarkPalette;
+    palette.background = jsonColorValue(document, "background", palette.background);
+    palette.header = jsonColorValue(document, "header", palette.header);
+    palette.surface = jsonColorValue(document, "surface", palette.surface);
+    palette.elevated = jsonColorValue(document, "elevated", palette.elevated);
+    palette.outline = jsonColorValue(document, "outline", palette.outline);
+    palette.primary = jsonColorValue(document, "primary", palette.primary);
+    palette.primaryContainer = jsonColorValue(document, "primary_container", palette.primaryContainer);
+    palette.text = jsonColorValue(document, "text", palette.text);
+    palette.secondaryText = jsonColorValue(document, "secondary_text", palette.secondaryText);
+    palette.selection = jsonColorValue(document, "selection", palette.selection);
+    palette.onPrimary = jsonColorValue(document, "on_primary", palette.onPrimary);
+    const std::string name = jsonStringValue(document, "name", iterator->path().stem().string());
+    themes.push_back({iterator->path().string(), name, palette,
+                      jsonBoolValue(document, "light", false)});
+  }
+  std::sort(themes.begin(), themes.end(), [](const CustomTheme& left,
+                                             const CustomTheme& right) {
+    return left.name < right.name;
+  });
+  return themes;
+}
 
 struct DecodedCodepoint {
   char32_t value;
@@ -169,6 +265,9 @@ std::size_t nextCodepointPosition(std::string_view text, std::size_t position) {
 }
 
 struct Layout {
+  Bounds packagesButton;
+  Bounds installedButton;
+  Bounds updatesButton;
   Bounds settingsButton;
   Bounds searchCard;
   Bounds searchField;
@@ -180,12 +279,21 @@ struct Layout {
   Bounds settingsPanel;
   Bounds appearanceTab;
   Bounds behaviorTab;
+  Bounds themesTab;
   Bounds systemTab;
   Bounds decreaseFontButton;
   Bounds increaseFontButton;
   Bounds themeButton;
+  Bounds languageButton;
+  Bounds iconSizeDecreaseButton;
+  Bounds iconSizeIncreaseButton;
+  Bounds cornerRadiusDecreaseButton;
+  Bounds cornerRadiusIncreaseButton;
+  Bounds borderDecreaseButton;
+  Bounds borderIncreaseButton;
   Bounds densityButton;
   Bounds descriptionsButton;
+  Bounds restoreSearchButton;
   Bounds animationButton;
   Bounds smoothScrollButton;
   Bounds sparkButton;
@@ -198,33 +306,38 @@ struct Layout {
   Bounds cacheConfirmPanel;
   Bounds cancelCacheButton;
   Bounds confirmCacheButton;
+  Bounds updateDialogPanel;
+  Bounds cancelUpdateButton;
+  Bounds confirmUpdateButton;
   Bounds infoDialogPanel;
   Bounds infoDialogCloseButton;
+  Bounds infoDialogContent;
   float headerHeight;
   float horizontalMargin;
   float queryTextX;
   float queryTextBaseline;
   float queryTextWidth;
   float statusBaseline;
-  float packagesTitleBaseline;
   float rowContentX;
   float helpButtonX;
   float helpButtonWidth;
   float actionButtonX;
   float actionButtonWidth;
   float actionButtonHeight;
-  float fontSizeValueX;
+  float fontSizeValueCenterX;
   float firstRowY;
   float rowHeight;
   float settingsScale;
+  float settingsContentOffset;
   float confirmScale;
   float confirmButtonWidth;
   float confirmButtonHeight;
   int visibleRows;
+  int drawableRows;
   bool showClearQueryButton;
 };
 
-enum class DropdownKind { none, fontFamily, fontStyle, theme };
+enum class DropdownKind { none, fontFamily, fontStyle, theme, language };
 
 struct DropdownGeometry {
   Bounds panel{};
@@ -242,15 +355,103 @@ std::vector<std::string> splitCodepoints(std::string_view text) {
   return result;
 }
 
-std::filesystem::path settingsPath() {
+std::filesystem::path configDirectory() {
   if (const char* configHome = std::getenv("XDG_CONFIG_HOME");
       configHome != nullptr && configHome[0] != '\0') {
-    return std::filesystem::path(configHome) / "flux" / "settings";
+    return std::filesystem::path(configHome) / "flux";
   }
   if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-    return std::filesystem::path(home) / ".config" / "flux" / "settings";
+    return std::filesystem::path(home) / ".config" / "flux";
   }
   return {};
+}
+
+std::filesystem::path settingsPath() {
+  const std::filesystem::path directory = configDirectory();
+  return directory.empty() ? std::filesystem::path{} : directory / "config.json";
+}
+
+std::filesystem::path legacySettingsPath() {
+  const std::filesystem::path directory = configDirectory();
+  return directory.empty() ? std::filesystem::path{} : directory / "settings";
+}
+
+std::string jsonStringValue(std::string_view document, std::string_view key,
+                            std::string fallback = {}) {
+  const std::string token = "\"" + std::string(key) + "\"";
+  std::size_t position = document.find(token);
+  if (position == std::string_view::npos) return fallback;
+  position = document.find(':', position + token.size());
+  if (position == std::string_view::npos) return fallback;
+  ++position;
+  while (position < document.size() &&
+         std::isspace(static_cast<unsigned char>(document[position]))) ++position;
+  if (position >= document.size() || document[position] != '"') return fallback;
+  ++position;
+  std::string value;
+  bool escaped = false;
+  for (; position < document.size(); ++position) {
+    const char character = document[position];
+    if (escaped) {
+      switch (character) {
+        case 'n': value.push_back('\n'); break;
+        case 'r': value.push_back('\r'); break;
+        case 't': value.push_back('\t'); break;
+        default: value.push_back(character); break;
+      }
+      escaped = false;
+    } else if (character == '\\') {
+      escaped = true;
+    } else if (character == '"') {
+      return value;
+    } else {
+      value.push_back(character);
+    }
+  }
+  return fallback;
+}
+
+double jsonNumberValue(std::string_view document, std::string_view key,
+                       double fallback) {
+  const std::string token = "\"" + std::string(key) + "\"";
+  std::size_t position = document.find(token);
+  if (position == std::string_view::npos) return fallback;
+  position = document.find(':', position + token.size());
+  if (position == std::string_view::npos) return fallback;
+  ++position;
+  while (position < document.size() &&
+         std::isspace(static_cast<unsigned char>(document[position]))) ++position;
+  double value = fallback;
+  const char* begin = document.data() + position;
+  const char* end = document.data() + document.size();
+  const auto parsed = std::from_chars(begin, end, value);
+  return parsed.ec == std::errc{} ? value : fallback;
+}
+
+bool jsonBoolValue(std::string_view document, std::string_view key, bool fallback) {
+  const std::string token = "\"" + std::string(key) + "\"";
+  std::size_t position = document.find(token);
+  if (position == std::string_view::npos) return fallback;
+  position = document.find(':', position + token.size());
+  if (position == std::string_view::npos) return fallback;
+  const std::string_view value = document.substr(position + 1);
+  const std::size_t truth = value.find("true");
+  const std::size_t falsity = value.find("false");
+  if (truth == std::string_view::npos && falsity == std::string_view::npos) return fallback;
+  return truth != std::string_view::npos &&
+         (falsity == std::string_view::npos || truth < falsity);
+}
+
+std::string jsonEscape(std::string_view value) {
+  std::string escaped;
+  for (const char character : value) {
+    if (character == '"' || character == '\\') escaped.push_back('\\');
+    if (character == '\n') { escaped += "\\n"; continue; }
+    if (character == '\r') { escaped += "\\r"; continue; }
+    if (character == '\t') { escaped += "\\t"; continue; }
+    escaped.push_back(character);
+  }
+  return escaped;
 }
 
 std::optional<bool> systemPreferredLightTheme() {
@@ -342,26 +543,60 @@ std::string_view themeModeName(ThemeMode mode) {
   return "system";
 }
 
-std::string_view themeModeLabel(ThemeMode mode) {
+std::string themeModeLabel(ThemeMode mode, const i18n::Catalog& catalog) {
   switch (mode) {
     case ThemeMode::light:
-      return "Light";
+      return catalog.text("theme.light");
     case ThemeMode::dark:
-      return "Dark";
+      return catalog.text("theme.dark");
     case ThemeMode::system:
-      return "System";
+      return catalog.text("theme.system");
   }
-  return "System";
+  return catalog.text("theme.system");
 }
 
 UserSettings loadSettings() {
   UserSettings settings;
   const std::filesystem::path path = settingsPath();
-  if (path.empty()) {
+  std::ifstream jsonInput(path, std::ios::binary);
+  if (jsonInput) {
+    const std::string document((std::istreambuf_iterator<char>(jsonInput)),
+                               std::istreambuf_iterator<char>());
+    settings.fontSize = std::clamp(
+        static_cast<int>(jsonNumberValue(document, "font_size", settings.fontSize)),
+        kMinimumFontSize, kMaximumFontSize);
+    settings.fontPath = jsonStringValue(document, "font_path");
+    settings.language = jsonStringValue(document, "language", "system");
+    if (settings.language != "system" && settings.language != "en" &&
+        settings.language != "ru" && settings.language != "ro") {
+      settings.language = "system";
+    }
+    settings.restoreLastSearch = jsonBoolValue(document, "restore_last_search", false);
+    settings.lastSearch = jsonStringValue(document, "last_search");
+    settings.cornerRadius = static_cast<float>(std::clamp(
+        jsonNumberValue(document, "corner_radius",
+                        static_cast<double>(settings.cornerRadius)), 0.0, 32.0));
+    settings.borderSize = static_cast<float>(std::clamp(
+        jsonNumberValue(document, "border_size",
+                        static_cast<double>(settings.borderSize)), 0.0, 6.0));
+    settings.iconScale = static_cast<float>(std::clamp(
+        jsonNumberValue(document, "icon_scale",
+                        static_cast<double>(settings.iconScale)), 0.6, 1.8));
+    settings.customTheme = jsonStringValue(document, "custom_theme", "");
+    const std::string theme = jsonStringValue(document, "theme", "system");
+    if (theme == "light") settings.themeMode = ThemeMode::light;
+    else if (theme == "dark") settings.themeMode = ThemeMode::dark;
+    settings.compactList = jsonBoolValue(document, "compact_list", settings.compactList);
+    settings.animations = jsonBoolValue(document, "animations", settings.animations);
+    settings.smoothScroll = jsonBoolValue(document, "smooth_scroll", settings.smoothScroll);
+    settings.clickSparks = jsonBoolValue(document, "click_sparks", settings.clickSparks);
+    settings.showPackageDescriptions = jsonBoolValue(
+        document, "show_package_descriptions", settings.showPackageDescriptions);
     return settings;
   }
 
-  std::ifstream input(path);
+  // Read the previous line-based config so upgrades preserve existing settings.
+  std::ifstream input(legacySettingsPath());
   std::string line;
   while (std::getline(input, line)) {
     const std::size_t separator = line.find('=');
@@ -386,6 +621,10 @@ UserSettings loadSettings() {
       }
     } else if (key == "font_path") {
       settings.fontPath = value;
+    } else if (key == "language" &&
+               (value == "system" || value == "en" || value == "ru" ||
+                value == "ro")) {
+      settings.language = value;
     } else if (key == "theme") {
       if (value == "light") {
         settings.themeMode = ThemeMode::light;
@@ -404,6 +643,22 @@ UserSettings loadSettings() {
       settings.clickSparks = value != "false";
     } else if (key == "show_package_descriptions") {
       settings.showPackageDescriptions = value != "false";
+    } else if (key == "restore_last_search") {
+      settings.restoreLastSearch = value == "true";
+    } else if (key == "last_search") {
+      settings.lastSearch = value;
+    } else if (key == "corner_radius") {
+      std::istringstream parsed(value);
+      parsed >> settings.cornerRadius;
+      settings.cornerRadius = std::clamp(settings.cornerRadius, 0.0F, 32.0F);
+    } else if (key == "border_size") {
+      std::istringstream parsed(value);
+      parsed >> settings.borderSize;
+      settings.borderSize = std::clamp(settings.borderSize, 0.0F, 6.0F);
+    } else if (key == "icon_scale") {
+      std::istringstream parsed(value);
+      parsed >> settings.iconScale;
+      settings.iconScale = std::clamp(settings.iconScale, 0.6F, 1.8F);
     }
   }
   return settings;
@@ -421,31 +676,46 @@ void saveSettings(const UserSettings& settings) {
     throw std::system_error(error, "Could not create the Flux settings directory");
   }
 
-  std::ofstream output(path);
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
   if (!output) {
     throw std::runtime_error("Could not write the Flux settings file");
   }
-  output << "font_size=" << settings.fontSize << '\n'
-         << "font_path=" << settings.fontPath << '\n'
-         << "theme=" << themeModeName(settings.themeMode) << '\n'
-         << "compact_list=" << (settings.compactList ? "true" : "false") << '\n'
-         << "animations=" << (settings.animations ? "true" : "false") << '\n'
-         << "smooth_scroll=" << (settings.smoothScroll ? "true" : "false")
-         << '\n'
-         << "click_sparks=" << (settings.clickSparks ? "true" : "false") << '\n'
-         << "show_package_descriptions="
-         << (settings.showPackageDescriptions ? "true" : "false") << '\n';
+  output << "{\n"
+         << "  \"font_size\": " << settings.fontSize << ",\n"
+         << "  \"font_path\": \"" << jsonEscape(settings.fontPath) << "\",\n"
+         << "  \"language\": \"" << jsonEscape(settings.language) << "\",\n"
+         << "  \"theme\": \"" << themeModeName(settings.themeMode) << "\",\n"
+         << "  \"compact_list\": " << (settings.compactList ? "true" : "false") << ",\n"
+         << "  \"animations\": " << (settings.animations ? "true" : "false") << ",\n"
+         << "  \"smooth_scroll\": " << (settings.smoothScroll ? "true" : "false") << ",\n"
+         << "  \"click_sparks\": " << (settings.clickSparks ? "true" : "false") << ",\n"
+         << "  \"show_package_descriptions\": "
+         << (settings.showPackageDescriptions ? "true" : "false") << ",\n"
+         << "  \"restore_last_search\": "
+         << (settings.restoreLastSearch ? "true" : "false") << ",\n"
+         << "  \"last_search\": \""
+         << jsonEscape(settings.restoreLastSearch ? settings.lastSearch : "") << "\",\n"
+         << "  \"corner_radius\": " << settings.cornerRadius << ",\n"
+         << "  \"border_size\": " << settings.borderSize << ",\n"
+         << "  \"icon_scale\": " << settings.iconScale << ",\n"
+         << "  \"custom_theme\": \"" << jsonEscape(settings.customTheme) << "\"\n"
+         << "}\n";
   if (!output) {
     throw std::runtime_error("Could not save the settings");
   }
 }
 
-Layout makeLayout(int width, int height, int fontSize, bool compactList) {
+Layout makeLayout(int width, int height, const render::Renderer& renderer,
+                  bool compactList) {
   const float windowWidth = std::max(0.0F, static_cast<float>(width));
   const float windowHeight = std::max(0.0F, static_cast<float>(height));
-  const float textSize = static_cast<float>(fontSize);
+  const float textSize = static_cast<float>(renderer.fontSize());
   const float margin = std::clamp(windowWidth * 0.025F, 12.0F, 32.0F);
   const float headerHeight = std::clamp(windowHeight * 0.09F, 48.0F, 64.0F);
+  const float packageNavWidth = 42.0F;
+  const float installedNavWidth = 42.0F;
+  const float updateNavWidth = 42.0F;
+  const float settingsNavWidth = 42.0F;
   const float searchCardHeight = std::clamp(windowHeight * 0.11F, 68.0F, 82.0F);
   const float searchCardY = headerHeight + 12.0F;
   const Bounds searchCard{margin, searchCardY,
@@ -462,13 +732,13 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float confirmHeight =
       std::min(240.0F, std::max(180.0F, windowHeight - 24.0F));
   const float confirmScale = confirmHeight / 240.0F;
-  const float confirmButtonWidth =
-      std::min(96.0F, (confirmWidth - 40.0F) / 2.0F - 6.0F);
+  const float confirmButtonWidth = std::min(
+      std::max(96.0F, textSize * 6.0F), (confirmWidth - 40.0F) / 2.0F - 6.0F);
   const float confirmButtonHeight = std::min(38.0F, confirmScale * 38.0F);
 
-  const float searchButtonWidth =
-      std::clamp((searchCard.width - 32.0F) * 0.30F,
-                 std::max(92.0F, textSize * 3.5F), 136.0F);
+  const float searchButtonWidth = std::min(
+      std::max(92.0F, textSize * 6.4F),
+      std::max(92.0F, (searchCard.width - 32.0F) * 0.42F));
   const float searchButtonHeight =
       std::min(48.0F, std::max(36.0F, searchCardHeight - 20.0F));
   const float searchButtonX =
@@ -481,8 +751,10 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float queryTextWidth =
       std::max(0.0F, searchFieldWidth - (showClearQueryButton ? 64.0F : 32.0F));
 
-  const float resultsY = searchCard.y + searchCard.height + 48.0F;
-  const float firstRowY = resultsY + 42.0F;
+  const float resultsY = searchCard.y + searchCard.height + 22.0F;
+  const float statusBaseline = searchCard.y + searchCard.height + 36.0F;
+  const float firstRowY = std::max(
+      resultsY + 34.0F, statusBaseline + textSize + 10.0F);
   const float bottomMargin = std::max(12.0F, margin);
   const float remainingRowHeight =
       std::max(48.0F, (windowHeight - firstRowY - bottomMargin) / 2.5F);
@@ -490,8 +762,8 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
       compactList ? std::max(54.0F, textSize * 2.2F)
                   : std::max(72.0F, textSize * 2.8F);
   const float rowHeight = std::min(requestedRowHeight, remainingRowHeight);
-  const float actionButtonWidth = std::clamp(
-      windowWidth * 0.10F, std::max(96.0F, textSize * 3.75F), 120.0F);
+  const float actionButtonWidth = std::min(
+      std::max(96.0F, textSize * 6.0F), windowWidth * 0.30F);
   const float actionButtonHeight = std::min(40.0F, rowHeight - 8.0F);
   const float actionButtonX = windowWidth - margin - 20.0F - actionButtonWidth;
   const float helpButtonWidth = std::min(36.0F, actionButtonHeight);
@@ -501,23 +773,52 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float panelY = (windowHeight - settingsHeight) / 2.0F;
   const float confirmX = (windowWidth - confirmWidth) / 2.0F;
   const float confirmY = (windowHeight - confirmHeight) / 2.0F;
-  const float infoWidth = std::min(520.0F, std::max(220.0F, windowWidth - 24.0F));
-  const float infoHeight = std::min(360.0F, std::max(200.0F, windowHeight - 24.0F));
+  const float infoWidth = std::min(720.0F, std::max(280.0F, windowWidth - 24.0F));
+  const float infoHeight = std::min(520.0F, std::max(260.0F, windowHeight - 24.0F));
   const float infoX = (windowWidth - infoWidth) / 2.0F;
   const float infoY = (windowHeight - infoHeight) / 2.0F;
   const float infoCloseSize = 32.0F;
   const float decrementSize = std::min(36.0F, std::max(24.0F, 44.0F * settingsScale));
-  const float closeWidth = std::min(100.0F, settingsWidth - 40.0F);
+  const float appearanceStepSize =
+      std::min(36.0F, std::max(24.0F, 36.0F * settingsScale));
+  float appearanceRow1Y = panelY + 100.0F * settingsScale;
+  float appearanceRow2Y = panelY + 148.0F * settingsScale;
+  float appearanceRow3Y = panelY + 196.0F * settingsScale;
+  float appearanceRow4Y = panelY + 244.0F * settingsScale;
+  float appearanceRow5Y = panelY + 292.0F * settingsScale;
+  float appearanceRow6Y = panelY + 340.0F * settingsScale;
+  float appearanceRow7Y = panelY + 388.0F * settingsScale;
+  const float closeWidth =
+      std::min(std::max(100.0F, textSize * 5.4F), settingsWidth - 40.0F);
   const float closeHeight =
       std::min(std::max(24.0F, 36.0F * settingsScale), 52.0F * settingsScale);
   const float headerCloseSize = 32.0F;
   const float settingsControlWidth =
       std::min(260.0F, std::max(92.0F, settingsWidth * 0.46F));
   const float settingsTabGap = 6.0F * settingsScale;
-  const float settingsTabWidth =
-      (settingsWidth - 40.0F * settingsScale - settingsTabGap * 2.0F) / 3.0F;
+  const bool compactSettingsTabs = settingsWidth < 520.0F || textSize > 18.0F;
+  const float settingsTabWidth = compactSettingsTabs
+      ? (settingsWidth - 40.0F * settingsScale - settingsTabGap) * 0.5F
+      : (settingsWidth - 40.0F * settingsScale - settingsTabGap * 3.0F) * 0.25F;
   const float settingsTabY = panelY + 52.0F * settingsScale;
-  const float settingsTabHeight = 32.0F * settingsScale;
+  const float settingsTabHeight =
+      std::max(32.0F * settingsScale, textSize + 10.0F);
+  const float secondSettingsTabY = settingsTabY + settingsTabHeight + settingsTabGap;
+  const float settingsTabBottom = compactSettingsTabs
+      ? secondSettingsTabY + settingsTabHeight
+      : settingsTabY + settingsTabHeight;
+  const float settingsContentOffset = std::max(
+      0.0F, settingsTabBottom + 14.0F - appearanceRow1Y);
+  const float settingsControlHeight =
+      std::max(38.0F * settingsScale, textSize + 4.0F);
+  appearanceRow1Y += settingsContentOffset;
+  appearanceRow2Y += settingsContentOffset;
+  appearanceRow3Y += settingsContentOffset;
+  appearanceRow4Y += settingsContentOffset;
+  appearanceRow5Y += settingsContentOffset;
+  appearanceRow6Y += settingsContentOffset;
+  appearanceRow7Y += settingsContentOffset;
+  const float firstSettingsTabX = panelX + 20.0F * settingsScale;
   const float scrollbarHeight =
       std::max(0.0F, windowHeight - firstRowY - bottomMargin);
   const float decreaseX =
@@ -526,25 +827,34 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float increaseX =
       settingsWidth < 400.0F ? settingsWidth - decrementSize - 20.0F
                              : settingsWidth - 72.0F;
-  const float valueWidth = textSize * 2.8F;
+  const float appearanceIncreaseX = settingsWidth - 56.0F;
+  const float appearanceValueWidth = std::max(48.0F, textSize * 3.6F);
+  const float appearanceDecreaseX = std::max(
+      20.0F, appearanceIncreaseX - appearanceStepSize - appearanceValueWidth - 16.0F);
   const float valueGapStart = decreaseX + decrementSize + 8.0F;
   const float valueGapEnd = increaseX - 8.0F;
-  const float fontSizeValueX =
-      panelX + (valueGapEnd - valueGapStart >= valueWidth
-                   ? (valueGapStart + valueGapEnd - valueWidth) / 2.0F
-                   : std::max(24.0F, decreaseX - valueWidth - 8.0F));
+  const float fontSizeValueCenterX =
+      panelX + (valueGapStart + valueGapEnd) * 0.5F;
   const float confirmButtonsY =
       confirmY + confirmHeight - 18.0F - confirmButtonHeight;
   const float queryTextX = searchFieldX + 16.0F;
   const float queryBaseline =
-      searchFieldY + searchFieldHeight / 2.0F + textSize * 0.34F;
-  const float statusBaseline = searchCard.y + searchCard.height + 36.0F;
-
+      renderer.baselineForCenter(searchFieldY + searchFieldHeight / 2.0F);
   return {
-      .settingsButton = {
-          windowWidth - margin - std::clamp(windowWidth * 0.10F, 90.0F, 118.0F),
-          (headerHeight - 38.0F) / 2.0F,
-          std::clamp(windowWidth * 0.10F, 90.0F, 118.0F), 38.0F},
+      .packagesButton = {windowWidth - margin - packageNavWidth - installedNavWidth -
+                             updateNavWidth - settingsNavWidth - 18.0F,
+                         (headerHeight - 36.0F) / 2.0F,
+                         packageNavWidth, 36.0F},
+      .installedButton = {windowWidth - margin - installedNavWidth - updateNavWidth -
+                              settingsNavWidth - 12.0F,
+                          (headerHeight - 36.0F) / 2.0F,
+                          installedNavWidth, 36.0F},
+      .updatesButton = {windowWidth - margin - updateNavWidth - settingsNavWidth - 6.0F,
+                        (headerHeight - 36.0F) / 2.0F,
+                        updateNavWidth, 36.0F},
+      .settingsButton = {windowWidth - margin - settingsNavWidth,
+                         (headerHeight - 36.0F) / 2.0F,
+                         settingsNavWidth, 36.0F},
       .searchCard = searchCard,
       .searchField = {searchFieldX, searchFieldY, searchFieldWidth,
                       searchFieldHeight},
@@ -561,55 +871,86 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
       .packageScrollbarTrack = {windowWidth - margin - 7.0F, firstRowY, 5.0F,
                                 scrollbarHeight},
       .settingsPanel = {panelX, panelY, settingsWidth, settingsHeight},
-      .appearanceTab = {panelX + 20.0F * settingsScale, settingsTabY,
+      .appearanceTab = {firstSettingsTabX, settingsTabY,
                         settingsTabWidth, settingsTabHeight},
-      .behaviorTab = {
-          panelX + 20.0F * settingsScale + settingsTabWidth + settingsTabGap,
-          settingsTabY, settingsTabWidth, settingsTabHeight},
+      .behaviorTab = {firstSettingsTabX + settingsTabWidth + settingsTabGap,
+                      settingsTabY, settingsTabWidth, settingsTabHeight},
+      .themesTab = {
+          firstSettingsTabX + (compactSettingsTabs ? 0.0F
+                                                   : (settingsTabWidth + settingsTabGap) * 2.0F),
+          compactSettingsTabs ? secondSettingsTabY : settingsTabY,
+          settingsTabWidth, settingsTabHeight},
       .systemTab = {
-          panelX + 20.0F * settingsScale +
-              (settingsTabWidth + settingsTabGap) * 2.0F,
-          settingsTabY, settingsTabWidth, settingsTabHeight},
+          firstSettingsTabX + (compactSettingsTabs
+                                   ? settingsTabWidth + settingsTabGap
+                                   : (settingsTabWidth + settingsTabGap) * 3.0F),
+          compactSettingsTabs ? secondSettingsTabY : settingsTabY,
+          settingsTabWidth, settingsTabHeight},
       .decreaseFontButton = {panelX + std::max(20.0F, decreaseX),
-                             panelY + 100.0F * settingsScale,
+                             appearanceRow1Y,
                              decrementSize, decrementSize},
       .increaseFontButton = {panelX + increaseX,
-                             panelY + 100.0F * settingsScale,
+                             appearanceRow1Y,
                              decrementSize, decrementSize},
       .themeButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                      panelY + 244.0F * settingsScale,
-                      settingsControlWidth, 38.0F * settingsScale},
+                      panelY + 128.0F * settingsScale + settingsContentOffset,
+                      settingsControlWidth, settingsControlHeight},
+      .languageButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
+                         appearanceRow4Y,
+                         settingsControlWidth, settingsControlHeight},
+      .iconSizeDecreaseButton = {panelX + appearanceDecreaseX,
+                                  appearanceRow5Y, appearanceStepSize,
+                                  appearanceStepSize},
+      .iconSizeIncreaseButton = {panelX + settingsWidth - 56.0F,
+                                  appearanceRow5Y, appearanceStepSize,
+                                  appearanceStepSize},
+      .cornerRadiusDecreaseButton = {panelX + appearanceDecreaseX,
+                                     appearanceRow6Y, appearanceStepSize,
+                                     appearanceStepSize},
+      .cornerRadiusIncreaseButton = {panelX + settingsWidth - 56.0F,
+                                     appearanceRow6Y, appearanceStepSize,
+                                     appearanceStepSize},
+      .borderDecreaseButton = {panelX + appearanceDecreaseX,
+                               appearanceRow7Y, appearanceStepSize,
+                               appearanceStepSize},
+      .borderIncreaseButton = {panelX + settingsWidth - 56.0F,
+                               appearanceRow7Y, appearanceStepSize,
+                               appearanceStepSize},
       .densityButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                        panelY + 110.0F * settingsScale,
-                        settingsControlWidth, 38.0F * settingsScale},
+                        panelY + 110.0F * settingsScale + settingsContentOffset,
+                        settingsControlWidth, settingsControlHeight},
       .descriptionsButton = {
           panelX + settingsWidth - settingsControlWidth - 20.0F,
-          panelY + 334.0F * settingsScale, settingsControlWidth,
-          38.0F * settingsScale},
+          panelY + 334.0F * settingsScale + settingsContentOffset, settingsControlWidth,
+          settingsControlHeight},
+      .restoreSearchButton = {
+          panelX + settingsWidth - settingsControlWidth - 20.0F,
+          panelY + 388.0F * settingsScale + settingsContentOffset, settingsControlWidth,
+          settingsControlHeight},
       .animationButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                          panelY + 278.0F * settingsScale,
-                          settingsControlWidth, 38.0F * settingsScale},
+                          panelY + 278.0F * settingsScale + settingsContentOffset,
+                          settingsControlWidth, settingsControlHeight},
       .smoothScrollButton = {
           panelX + settingsWidth - settingsControlWidth - 20.0F,
-          panelY + 166.0F * settingsScale, settingsControlWidth,
-          38.0F * settingsScale},
+          panelY + 166.0F * settingsScale + settingsContentOffset, settingsControlWidth,
+          settingsControlHeight},
       .sparkButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                      panelY + 222.0F * settingsScale, settingsControlWidth,
-                      38.0F * settingsScale},
+                      panelY + 222.0F * settingsScale + settingsContentOffset, settingsControlWidth,
+                      settingsControlHeight},
       .fontFamilyButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                           panelY + 148.0F * settingsScale,
-                           settingsControlWidth, 38.0F * settingsScale},
+                           appearanceRow2Y,
+                           settingsControlWidth, settingsControlHeight},
       .fontStyleButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
-                          panelY + 196.0F * settingsScale,
-                          settingsControlWidth, 38.0F * settingsScale},
+                          appearanceRow3Y,
+                          settingsControlWidth, settingsControlHeight},
       .clearCacheButton = {panelX + 20.0F,
-                           panelY + 156.0F * settingsScale,
+                           panelY + 156.0F * settingsScale + settingsContentOffset,
                            settingsWidth - 40.0F,
-                           40.0F * settingsScale},
+                           settingsControlHeight},
       .resetSettingsButton = {panelX + 20.0F,
-                              panelY + 210.0F * settingsScale,
+                              panelY + 232.0F * settingsScale + settingsContentOffset,
                               settingsWidth - 40.0F,
-                              40.0F * settingsScale},
+                              settingsControlHeight},
       .closeSettingsButton = {panelX + settingsWidth - closeWidth - 20.0F,
                               panelY + settingsHeight - 52.0F * settingsScale,
                               closeWidth, closeHeight},
@@ -623,32 +964,45 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
       .confirmCacheButton = {
           confirmX + confirmWidth - confirmButtonWidth - 16.0F,
           confirmButtonsY, confirmButtonWidth, confirmButtonHeight},
+      .updateDialogPanel = {confirmX, confirmY, confirmWidth, confirmHeight},
+      .cancelUpdateButton = {
+          confirmX + confirmWidth - confirmButtonWidth * 2.0F - 28.0F,
+          confirmButtonsY, confirmButtonWidth, confirmButtonHeight},
+      .confirmUpdateButton = {
+          confirmX + confirmWidth - confirmButtonWidth - 16.0F,
+          confirmButtonsY, confirmButtonWidth, confirmButtonHeight},
       .infoDialogPanel = {infoX, infoY, infoWidth, infoHeight},
       .infoDialogCloseButton = {
           infoX + infoWidth - infoCloseSize - 16.0F, infoY + 12.0F,
           infoCloseSize, infoCloseSize},
+      .infoDialogContent = {infoX + 24.0F, infoY + 222.0F,
+                            std::max(0.0F, infoWidth - 48.0F),
+                            std::max(0.0F, infoHeight - 242.0F)},
       .headerHeight = headerHeight,
       .horizontalMargin = margin,
       .queryTextX = queryTextX,
       .queryTextBaseline = queryBaseline,
       .queryTextWidth = queryTextWidth,
       .statusBaseline = statusBaseline,
-      .packagesTitleBaseline = resultsY + 30.0F,
       .rowContentX = margin + 20.0F,
       .helpButtonX = helpButtonX,
       .helpButtonWidth = helpButtonWidth,
       .actionButtonX = actionButtonX,
       .actionButtonWidth = actionButtonWidth,
       .actionButtonHeight = actionButtonHeight,
-      .fontSizeValueX = fontSizeValueX,
+      .fontSizeValueCenterX = fontSizeValueCenterX,
       .firstRowY = firstRowY,
       .rowHeight = rowHeight,
       .settingsScale = settingsScale,
+      .settingsContentOffset = settingsContentOffset,
       .confirmScale = confirmScale,
       .confirmButtonWidth = confirmButtonWidth,
       .confirmButtonHeight = confirmButtonHeight,
       .visibleRows = std::max(
           0, static_cast<int>((windowHeight - firstRowY - bottomMargin) / rowHeight)),
+      .drawableRows = std::max(
+          0, static_cast<int>(std::ceil(
+                 (windowHeight - firstRowY - bottomMargin) / rowHeight))),
       .showClearQueryButton = showClearQueryButton};
 }
 
@@ -661,12 +1015,12 @@ bool contains(const Bounds& bounds, double x, double y) {
 }
 
 std::string iconPath(std::string_view filename) {
-  const std::string sourcePath =
-      std::string(FLUX_ASSET_DIR) + "/" + std::string(filename);
+  const std::string relative = "icons/" + std::string(filename);
+  const std::string sourcePath = std::string(FLUX_ASSET_DIR) + "/" + relative;
   if (std::filesystem::exists(sourcePath)) {
     return sourcePath;
   }
-  return std::string(FLUX_INSTALL_ASSET_DIR) + "/" + std::string(filename);
+  return std::string(FLUX_INSTALL_ASSET_DIR) + "/" + relative;
 }
 
 void addRoundedRect(std::vector<render::RectItem>& rectangles, const Bounds& bounds,
@@ -685,7 +1039,7 @@ void addButtonSurface(std::vector<render::RectItem>& rectangles,
                       std::array<float, 3> border, float hoverAmount,
                       float pressAmount) {
   addRoundedRect(rectangles, bounds, border, 12.0F);
-  const float inset = 2.0F;
+  const float inset = 1.0F;
   const std::array<float, 3> hoverFill{
       std::min(1.0F, fill[0] + 0.08F),
       std::min(1.0F, fill[1] + 0.08F),
@@ -739,16 +1093,30 @@ struct PackageView::Impl {
     std::array<float, 3> color;
   };
 
+  struct PackageAppearance {
+    std::chrono::steady_clock::time_point started;
+    float duration = 0.1F;
+  };
+
+  enum class ViewMode { packages, installed, updates };
+
   GLFWwindow* window;
   render::Renderer& renderer;
   pm::Manager packageManager;
+  i18n::Catalog catalog;
   bool searchFocused = true;
   bool settingsOpen = false;
+  ViewMode view = ViewMode::packages;
   bool cacheConfirmOpen = false;
+  bool updatesOpen = false;
   bool packageInfoOpen = false;
   bool cacheClearTask = false;
+  bool updateTask = false;
+  ViewMode pendingView = ViewMode::packages;
   bool mouseWasDown = false;
   float infoTransition = 0.0F;
+  float categoryTransition = 1.0F;
+  float infoScrollOffset = 0.0F;
   bool draggingSearchSelection = false;
   bool draggingPackageScrollbar = false;
   bool dropdownOpen = false;
@@ -759,8 +1127,11 @@ struct PackageView::Impl {
   GLFWcursor* textCursor = nullptr;
   double cursorX = 0.0;
   double cursorY = 0.0;
-  int scrollOffset = 0;
+  float scrollOffset = 0.0F;
   float scrollPosition = 0.0F;
+  mutable float packageScrollbarHover = 0.0F;
+  bool packageListExiting = false;
+  float packageListTransition = 1.0F;
   float settingsTransition = 0.0F;
   float dropdownTransition = 0.0F;
   float clearQueryButtonTransition = 0.0F;
@@ -773,7 +1144,7 @@ struct PackageView::Impl {
   std::size_t queryCursor = 0;
   std::size_t selectionAnchor = std::string::npos;
   std::string query;
-  std::string status = "Type a package name and press Enter to search.";
+  std::string status;
   std::string settingsStatus;
   pm::Package infoPackage;
   UserSettings settings;
@@ -786,14 +1157,20 @@ struct PackageView::Impl {
   std::chrono::steady_clock::time_point nextSystemThemeCheck =
       std::chrono::steady_clock::now();
   float frameDeltaSeconds = 0.0F;
+  mutable float cornerScale = 1.0F;
   mutable std::unordered_map<std::string, float> hoverAmounts;
   mutable std::unordered_map<std::string, ButtonPress> buttonPressTimes;
   mutable std::unordered_map<std::string, float> switchPositions;
+  mutable std::unordered_map<std::string, PackageAppearance>
+      packageAppearanceStarts;
   std::vector<pm::Package> packages;
+  std::vector<pm::Package> savedPackages;
   std::vector<render::FontFace> fontFaces;
   std::vector<std::string> fontFamilies;
   std::vector<render::FontFace> dropdownChoices;
-  std::vector<ThemeMode> dropdownThemeChoices;
+  std::vector<std::string> dropdownThemeChoices;
+  std::vector<CustomTheme> customThemes;
+  std::vector<std::string> dropdownLanguageChoices;
   std::vector<SparkParticle> sparkParticles;
   std::vector<AnimatedGlyph> queryGlyphs;
   std::vector<DisappearingGlyph> disappearingGlyphs;
@@ -806,8 +1183,27 @@ struct PackageView::Impl {
        pm::Manager selectedManager)
       : window(owner.nativeHandle()),
         renderer(rendererRef),
-        packageManager(selectedManager) {
+        packageManager(selectedManager),
+        catalog(i18n::Catalog::fromSystemLocale()) {
     settings = loadSettings();
+    customThemes = loadCustomThemes();
+    if (!settings.customTheme.empty() &&
+        std::none_of(customThemes.begin(), customThemes.end(), [this](const CustomTheme& theme) {
+          return theme.path == settings.customTheme;
+        })) {
+      settings.customTheme.clear();
+    }
+    catalog = i18n::Catalog::fromLanguage(
+        settings.language == "system" ? std::string_view{} : settings.language);
+    status = catalog.text("status.initial");
+    if (!settingsPath().empty() && !std::filesystem::exists(settingsPath()) &&
+        std::filesystem::exists(legacySettingsPath())) {
+      try { saveSettings(settings); } catch (...) { }
+    }
+    if (settings.restoreLastSearch) {
+      query = settings.lastSearch;
+      queryCursor = query.size();
+    }
     renderer.setFontSize(settings.fontSize);
     previousFontSize = settings.fontSize;
     systemLightTheme = systemPreferredLightTheme().value_or(false);
@@ -820,7 +1216,8 @@ struct PackageView::Impl {
       try {
         renderer.setFontFace(settings.fontPath);
       } catch (const std::exception& error) {
-        settingsStatus = std::string("Could not load saved font: ") + error.what();
+        settingsStatus = catalog.format(
+            "settings.error.loadFont", {{"error", error.what()}});
         // Fall back to the system font instead of pinning a replacement path.
         settings.fontPath.clear();
       }
@@ -848,7 +1245,7 @@ struct PackageView::Impl {
       }
     }
     if (packageManager == pm::Manager::none) {
-      status = "Package operations are not supported on this distribution.";
+      status = catalog.text("status.unsupported");
     }
     syncQueryGlyphs();
     glfwSetWindowUserPointer(window, this);
@@ -872,8 +1269,37 @@ struct PackageView::Impl {
   }
 
   bool themeIsLight() const {
+    if (!settings.customTheme.empty()) {
+      const auto selected = std::find_if(
+          customThemes.begin(), customThemes.end(), [this](const CustomTheme& theme) {
+            return theme.path == settings.customTheme;
+          });
+      if (selected != customThemes.end()) return selected->light;
+    }
     return settings.themeMode == ThemeMode::light ||
            (settings.themeMode == ThemeMode::system && systemLightTheme);
+  }
+
+  const Palette& currentPalette() const {
+    if (!settings.customTheme.empty()) {
+      const auto selected = std::find_if(
+          customThemes.begin(), customThemes.end(), [this](const CustomTheme& theme) {
+            return theme.path == settings.customTheme;
+          });
+      if (selected != customThemes.end()) return selected->palette;
+    }
+    return themeIsLight() ? kLightPalette : kDarkPalette;
+  }
+
+  std::string currentThemeName() const {
+    if (!settings.customTheme.empty()) {
+      const auto selected = std::find_if(
+          customThemes.begin(), customThemes.end(), [this](const CustomTheme& theme) {
+            return theme.path == settings.customTheme;
+          });
+      if (selected != customThemes.end()) return selected->name;
+    }
+    return themeModeLabel(settings.themeMode, catalog);
   }
 
   void updateCursor(const Layout& layout) const {
@@ -881,6 +1307,9 @@ struct PackageView::Impl {
     bool text = false;
     if (packageInfoOpen || infoTransition > 0.005F) {
       pointer = contains(layout.infoDialogCloseButton, cursorX, cursorY);
+    } else if (updatesOpen) {
+      pointer = contains(layout.cancelUpdateButton, cursorX, cursorY) ||
+                contains(layout.confirmUpdateButton, cursorX, cursorY);
     } else if (cacheConfirmOpen) {
       pointer = contains(layout.cancelCacheButton, cursorX, cursorY) ||
                 contains(layout.confirmCacheButton, cursorX, cursorY);
@@ -890,19 +1319,29 @@ struct PackageView::Impl {
           contains(layout.closeSettingsButton, cursorX, cursorY) ||
           contains(layout.appearanceTab, cursorX, cursorY) ||
           contains(layout.behaviorTab, cursorX, cursorY) ||
+          contains(layout.themesTab, cursorX, cursorY) ||
           contains(layout.systemTab, cursorX, cursorY);
       if (settingsCategory == SettingsCategory::appearance) {
         pointer = pointer || contains(layout.decreaseFontButton, cursorX, cursorY) ||
                   contains(layout.increaseFontButton, cursorX, cursorY) ||
                   contains(layout.fontFamilyButton, cursorX, cursorY) ||
                   contains(layout.fontStyleButton, cursorX, cursorY) ||
-                  contains(layout.themeButton, cursorX, cursorY);
+                  contains(layout.languageButton, cursorX, cursorY) ||
+                  contains(layout.iconSizeDecreaseButton, cursorX, cursorY) ||
+                  contains(layout.iconSizeIncreaseButton, cursorX, cursorY) ||
+                  contains(layout.cornerRadiusDecreaseButton, cursorX, cursorY) ||
+                  contains(layout.cornerRadiusIncreaseButton, cursorX, cursorY) ||
+                  contains(layout.borderDecreaseButton, cursorX, cursorY) ||
+                  contains(layout.borderIncreaseButton, cursorX, cursorY);
+      } else if (settingsCategory == SettingsCategory::themes) {
+        pointer = pointer || contains(layout.themeButton, cursorX, cursorY);
       } else if (settingsCategory == SettingsCategory::behavior) {
         pointer = pointer || contains(layout.densityButton, cursorX, cursorY) ||
                   contains(layout.descriptionsButton, cursorX, cursorY) ||
                   contains(layout.smoothScrollButton, cursorX, cursorY) ||
                   contains(layout.sparkButton, cursorX, cursorY) ||
-                  contains(layout.animationButton, cursorX, cursorY);
+                  contains(layout.animationButton, cursorX, cursorY) ||
+                  contains(layout.restoreSearchButton, cursorX, cursorY);
       } else {
         pointer = pointer || contains(layout.clearCacheButton, cursorX, cursorY) ||
                   contains(layout.resetSettingsButton, cursorX, cursorY);
@@ -912,22 +1351,27 @@ struct PackageView::Impl {
         pointer = pointer || contains(geometry.panel, cursorX, cursorY);
       }
     } else if (!packageInfoOpen) {
-      text = contains(layout.searchField, cursorX, cursorY);
-      pointer = contains(layout.settingsButton, cursorX, cursorY) ||
-                contains(layout.searchButton, cursorX, cursorY) ||
-                (layout.showClearQueryButton &&
+      text = view == ViewMode::packages &&
+             contains(layout.searchField, cursorX, cursorY);
+      pointer = contains(layout.packagesButton, cursorX, cursorY) ||
+                contains(layout.settingsButton, cursorX, cursorY) ||
+                (packageManager != pm::Manager::none &&
+                 (contains(layout.installedButton, cursorX, cursorY) ||
+                  contains(layout.updatesButton, cursorX, cursorY))) ||
+                (view != ViewMode::installed &&
+                 contains(layout.searchButton, cursorX, cursorY)) ||
+                (view == ViewMode::packages && layout.showClearQueryButton &&
                  clearQueryButtonTransition > 0.005F &&
                  contains(layout.clearQueryButton, cursorX, cursorY));
       pointer = pointer ||
                 (layout.visibleRows > 0 &&
                  packages.size() > static_cast<std::size_t>(layout.visibleRows) &&
-                 contains(layout.packageScrollbarTrack, cursorX, cursorY));
+                 contains(scrollbarHoverBounds(layout), cursorX, cursorY));
       if (!busy()) {
         const std::size_t first = std::min(
             static_cast<std::size_t>(std::floor(scrollPosition)), packages.size());
         const float fraction = scrollPosition - std::floor(scrollPosition);
-        const int rows =
-            layout.visibleRows + (fraction > 0.0F ? 1 : 0);
+        const int rows = layout.drawableRows + (fraction > 0.0F ? 1 : 0);
         const float listBottom =
             layout.resultsPanel.y + layout.resultsPanel.height;
         const float cursorYFloat = static_cast<float>(cursorY);
@@ -988,6 +1432,13 @@ struct PackageView::Impl {
             track.width, thumbHeight};
   }
 
+  Bounds scrollbarHoverBounds(const Layout& layout) const {
+    Bounds bounds = layout.packageScrollbarTrack;
+    bounds.x -= 5.0F;
+    bounds.width += 5.0F;
+    return bounds;
+  }
+
   void setScrollFromCursor(const Layout& layout) {
     const Bounds& track = layout.packageScrollbarTrack;
     const Bounds thumb = scrollbarThumb(layout);
@@ -1001,11 +1452,8 @@ struct PackageView::Impl {
         (static_cast<float>(cursorY) - track.y - thumb.height * 0.5F) /
             movableTrack,
         0.0F, 1.0F);
-    scrollOffset = static_cast<int>(
-        std::lround(fraction * static_cast<float>(maxOffset)));
-    if (!settings.smoothScroll) {
-      scrollPosition = static_cast<float>(scrollOffset);
-    }
+    scrollOffset = fraction * static_cast<float>(maxOffset);
+    scrollPosition = scrollOffset;
   }
 
   static Impl* fromWindow(GLFWwindow* window) {
@@ -1049,9 +1497,9 @@ struct PackageView::Impl {
   }
 
   void syncQueryGlyphs() {
-    const std::vector<std::string> target =
-        splitCodepoints(query.empty() ? kSearchPlaceholder
-                                      : std::string_view(query));
+    const std::string placeholder = catalog.text("search.placeholder");
+    const std::vector<std::string> target = splitCodepoints(
+        query.empty() ? std::string_view(placeholder) : std::string_view(query));
     if (!settings.animations) {
       queryGlyphs.clear();
       queryGlyphs.reserve(target.size());
@@ -1145,7 +1593,7 @@ struct PackageView::Impl {
     packages.clear();
     scrollOffset = 0;
     scrollPosition = 0.0F;
-    status = "Press Enter or click Search.";
+    status = catalog.text("status.pressSearch");
   }
 
   void clearQuery() {
@@ -1176,10 +1624,6 @@ struct PackageView::Impl {
       position = previous;
     }
     return position;
-  }
-
-  float queryCharacterWidth() const {
-    return std::max(1.0F, static_cast<float>(renderer.fontSize()) * 0.55F);
   }
 
   std::pair<std::size_t, std::size_t> queryViewRange(float availableWidth) const {
@@ -1266,7 +1710,7 @@ struct PackageView::Impl {
 
   static void onCharacter(GLFWwindow* window, unsigned int codepoint) {
     Impl* self = fromWindow(window);
-    if (self == nullptr || self->busy() || self->settingsOpen || !self->searchFocused ||
+    if (self == nullptr || self->busy() || self->settingsOpen || self->view != ViewMode::packages || !self->searchFocused ||
         self->cacheConfirmOpen || self->packageInfoOpen ||
         self->infoTransition > 0.005F || codepoint < 32 ||
         (codepoint >= 0x7F && codepoint <= 0x9F) || codepoint > 0x10FFFF ||
@@ -1301,8 +1745,12 @@ struct PackageView::Impl {
         self->dropdownOpen = false;
       } else if (self->cacheConfirmOpen) {
         self->cacheConfirmOpen = false;
+      } else if (self->updatesOpen) {
+        self->updatesOpen = false;
       } else if (self->settingsOpen) {
         self->settingsOpen = false;
+      } else if (self->view != ViewMode::packages) {
+        self->showPackages();
       } else if (self->searchFocused && !self->query.empty()) {
         self->clearQuery();
       }
@@ -1328,7 +1776,7 @@ struct PackageView::Impl {
         int width = 0;
         int height = 0;
         glfwGetFramebufferSize(window, &width, &height);
-        const Layout layout = makeLayout(width, height, self->renderer.fontSize(),
+        const Layout layout = makeLayout(width, height, self->renderer,
                                          self->settings.compactList);
         const int visibleRows = self->dropdownGeometry(layout).visibleRows;
         self->dropdownScroll = std::max(
@@ -1446,16 +1894,20 @@ struct PackageView::Impl {
 
   static void onScroll(GLFWwindow* window, double, double yOffset) {
     Impl* self = fromWindow(window);
-    if (self == nullptr || self->busy() || self->packageInfoOpen ||
-        self->infoTransition > 0.005F) {
+    if (self == nullptr || self->busy()) {
+      return;
+    }
+    if (self->packageInfoOpen || self->infoTransition > 0.005F) {
+      self->infoScrollOffset = std::max(
+          0.0F, self->infoScrollOffset - static_cast<float>(yOffset) * 3.0F);
       return;
     }
 
     int width = 0;
     int height = 0;
     glfwGetFramebufferSize(window, &width, &height);
-    const Layout layout =
-        makeLayout(width, height, self->renderer.fontSize(), self->settings.compactList);
+    const Layout layout = makeLayout(width, height, self->renderer,
+                                     self->settings.compactList);
     if (self->settingsOpen && self->dropdownOpen) {
       const DropdownGeometry geometry = self->dropdownGeometry(layout);
       const int maxScroll = std::max(
@@ -1481,12 +1933,12 @@ struct PackageView::Impl {
     if (self->settingsOpen || self->packages.empty()) {
       return;
     }
-    const int scrollDelta = yOffset > 0.0 ? 1 : yOffset < 0.0 ? -1 : 0;
+    const float maxOffset = static_cast<float>(std::max(
+        0, static_cast<int>(self->packages.size()) - layout.visibleRows));
     self->scrollOffset = std::clamp(
-        self->scrollOffset - scrollDelta, 0,
-        std::max(0, static_cast<int>(self->packages.size()) - layout.visibleRows));
+        self->scrollOffset - static_cast<float>(yOffset), 0.0F, maxOffset);
     if (!self->settings.smoothScroll) {
-      self->scrollPosition = static_cast<float>(self->scrollOffset);
+      self->scrollPosition = self->scrollOffset;
     }
   }
 
@@ -1495,23 +1947,25 @@ struct PackageView::Impl {
       return;
     }
     if (packageManager == pm::Manager::none) {
-      status = "Package operations are not supported on this distribution.";
+      status = catalog.text("status.unsupported");
       return;
     }
     if (query.empty()) {
-      packages.clear();
-      scrollOffset = 0;
-      status = "Enter a package name before searching.";
+      beginPackageListExit();
+      status = catalog.text("status.enterQuery");
       return;
     }
 
     const std::string searchTerm = query;
-    packages.clear();
-    scrollOffset = 0;
-    scrollPosition = 0.0F;
+    if (settings.restoreLastSearch) {
+      settings.lastSearch = query;
+      persistSettings();
+    }
+    beginPackageListExit();
+    pendingView = ViewMode::packages;
     const std::string managerName =
         packageManager == pm::Manager::dnf ? "DNF" : "pacman";
-    status = "Searching " + managerName + " repositories...";
+    status = catalog.format("status.searching", {{"manager", managerName}});
     searchProgress.store(0.0F, std::memory_order_relaxed);
     searchTask = std::async(std::launch::async, [searchTerm, this] {
       return pm::searchPackages(packageManager, searchTerm, [this](float progress) {
@@ -1520,17 +1974,115 @@ struct PackageView::Impl {
     });
   }
 
+  void startUpdateSearch() {
+    if (busy() || packageManager == pm::Manager::none) return;
+    beginPackageListExit();
+    pendingView = ViewMode::updates;
+    const pm::Manager manager = packageManager;
+    status = catalog.text("updates.searching");
+    searchProgress.store(0.0F, std::memory_order_relaxed);
+    searchTask = std::async(std::launch::async, [manager, this] {
+      return pm::listUpdates(manager, [this](float progress) {
+        searchProgress.store(progress, std::memory_order_relaxed);
+      });
+    });
+  }
+
+  void startInstalledSearch() {
+    if (busy() || packageManager == pm::Manager::none) return;
+    beginPackageListExit();
+    pendingView = ViewMode::installed;
+    const pm::Manager manager = packageManager;
+    status = catalog.text("installed.searching");
+    searchProgress.store(0.0F, std::memory_order_relaxed);
+    searchTask = std::async(std::launch::async, [manager, this] {
+      return pm::listInstalled(manager, [this](float progress) {
+        searchProgress.store(progress, std::memory_order_relaxed);
+      });
+    });
+  }
+
+  void showUpdates() {
+    if (busy() || packageManager == pm::Manager::none) return;
+    if (view == ViewMode::updates) {
+      startUpdateSearch();
+      return;
+    }
+    if (view == ViewMode::packages) {
+      savedPackages = std::move(packages);
+    }
+    packageAppearanceStarts.clear();
+    view = ViewMode::updates;
+    scrollOffset = scrollPosition = 0.0F;
+    searchFocused = false;
+    startUpdateSearch();
+  }
+
+  void showInstalled() {
+    if (busy() || packageManager == pm::Manager::none) return;
+    if (view == ViewMode::installed) {
+      startInstalledSearch();
+      return;
+    }
+    if (view == ViewMode::packages) {
+      savedPackages = std::move(packages);
+    }
+    packageAppearanceStarts.clear();
+    view = ViewMode::installed;
+    scrollOffset = scrollPosition = 0.0F;
+    searchFocused = false;
+    startInstalledSearch();
+  }
+
+  void showPackages() {
+    if (view == ViewMode::packages) return;
+    packages = std::move(savedPackages);
+    packageAppearanceStarts.clear();
+    view = ViewMode::packages;
+    packageListExiting = false;
+    scrollOffset = scrollPosition = 0.0F;
+    searchFocused = true;
+    status = packages.empty() ? catalog.text("status.enterQuery")
+                              : catalog.format("status.foundResults",
+                                  {{"count", std::to_string(packages.size())}});
+  }
+
+  void beginPackageListExit() {
+    if (settings.animations && !packages.empty()) {
+      packageListExiting = true;
+      packageListTransition = 1.0F;
+      return;
+    }
+    packages.clear();
+    packageAppearanceStarts.clear();
+    packageListExiting = false;
+    packageListTransition = 1.0F;
+    scrollOffset = 0.0F;
+    scrollPosition = 0.0F;
+  }
+
   void startAction(const pm::Package& package) {
     if (busy() || packageManager == pm::Manager::none) {
       return;
     }
 
     const std::string packageName = package.name;
+    if (view == ViewMode::updates) {
+      updateTask = true;
+      cacheClearTask = false;
+      activeActionPackage = packageName;
+      status = catalog.format("status.updatingPackage", {{"package", packageName}});
+      const pm::Manager manager = packageManager;
+      actionTask = std::async(std::launch::async, [manager, packageName] {
+        pm::updatePackage(manager, packageName);
+      });
+      return;
+    }
     const bool installed = package.installed;
     cacheClearTask = false;
     activeActionPackage = packageName;
-    status = std::string(installed ? "Removing " : "Installing ") + packageName +
-             " (Polkit may ask for authentication)...";
+    status = catalog.format(installed ? "status.removing" : "status.installing",
+                            {{"package", packageName}});
     const pm::Manager manager = packageManager;
     actionTask = std::async(std::launch::async, [packageName, installed, manager] {
       if (installed) {
@@ -1550,9 +2102,24 @@ struct PackageView::Impl {
     const pm::Manager manager = packageManager;
     const std::string managerName =
         manager == pm::Manager::dnf ? "DNF" : "pacman";
-    status = "Clearing the entire " + managerName + " package cache via Polkit...";
+    status = catalog.format("status.clearingCache", {{"manager", managerName}});
     actionTask = std::async(std::launch::async,
                             [manager] { pm::clearPackageCache(manager); });
+  }
+
+  void startSystemUpdate() {
+    if (busy() || packageManager == pm::Manager::none) {
+      return;
+    }
+    updateTask = true;
+    cacheClearTask = false;
+    activeActionPackage.clear();
+    const std::string managerName =
+        packageManager == pm::Manager::dnf ? "DNF" : "pacman";
+    status = catalog.format("status.updating", {{"manager", managerName}});
+    const pm::Manager manager = packageManager;
+    actionTask = std::async(std::launch::async,
+                            [manager] { pm::updateAllPackages(manager); });
   }
 
   void updateSearch() {
@@ -1561,15 +2128,43 @@ struct PackageView::Impl {
       return;
     }
     try {
-      packages = searchTask.get();
+      std::vector<pm::Package> results = searchTask.get();
+      const ViewMode completedView = pendingView;
+      pendingView = ViewMode::packages;
+      if (completedView != view) return;
+      packages = std::move(results);
+      packageAppearanceStarts.clear();
+      packageListExiting = false;
+      packageListTransition = 1.0F;
       searchProgress.store(1.0F, std::memory_order_relaxed);
       scrollOffset = 0;
       scrollPosition = 0.0F;
-      status = packages.empty() ? "No matching packages found."
-                                : "Found " + std::to_string(packages.size()) +
-                                      " packages. Select an action.";
+      switch (view) {
+        case ViewMode::updates:
+          status = packages.empty()
+                       ? catalog.text("updates.none")
+                       : catalog.format("updates.found",
+                            {{"count", std::to_string(packages.size())}});
+          break;
+        case ViewMode::installed:
+          status = packages.empty()
+                       ? catalog.text("installed.none")
+                       : catalog.format("installed.found",
+                            {{"count", std::to_string(packages.size())}});
+          break;
+        case ViewMode::packages:
+          status = packages.empty()
+                       ? catalog.text("status.noResults")
+                       : catalog.format("status.foundResults",
+                            {{"count", std::to_string(packages.size())}});
+          break;
+      }
     } catch (const std::exception& error) {
-      status = std::string("Search failed: ") + error.what();
+      const ViewMode completedView = pendingView;
+      pendingView = ViewMode::packages;
+      if (completedView == view) {
+        status = catalog.format("status.searchFailed", {{"error", error.what()}});
+      }
     }
   }
 
@@ -1579,20 +2174,37 @@ struct PackageView::Impl {
       return;
     }
     const bool wasCacheClear = cacheClearTask;
+    const bool wasSystemUpdate = updateTask;
     cacheClearTask = false;
+    updateTask = false;
     activeActionPackage.clear();
     try {
       actionTask.get();
       if (wasCacheClear) {
         const std::string managerName =
             packageManager == pm::Manager::dnf ? "DNF" : "Pacman";
-        status = managerName + " package cache cleared.";
+        status = catalog.format("status.cacheCleared", {{"manager", managerName}});
         return;
       }
-      status = "Transaction finished; refreshing results...";
-      startSearch();
+      if (wasSystemUpdate) {
+        status = catalog.text("status.updated");
+        if (view == ViewMode::updates) {
+          startUpdateSearch();
+        } else if (view == ViewMode::installed) {
+          startInstalledSearch();
+        }
+        return;
+      }
+      status = catalog.text("status.transactionFinished");
+      if (view == ViewMode::updates) {
+        startUpdateSearch();
+      } else if (view == ViewMode::installed) {
+        startInstalledSearch();
+      } else {
+        startSearch();
+      }
     } catch (const std::exception& error) {
-      status = std::string("Transaction failed: ") + error.what();
+      status = catalog.format("status.transactionFailed", {{"error", error.what()}});
     }
   }
 
@@ -1610,7 +2222,8 @@ struct PackageView::Impl {
       fontSizeTransition = settings.animations ? 0.0F : 1.0F;
       persistSettings();
     } catch (const std::exception& error) {
-      settingsStatus = std::string("Could not change font size: ") + error.what();
+      settingsStatus = catalog.format("settings.error.fontSize",
+                                      {{"error", error.what()}});
     }
   }
 
@@ -1621,7 +2234,8 @@ struct PackageView::Impl {
         settings.fontPath.clear();
         persistSettings();
       } catch (const std::exception& error) {
-        settingsStatus = std::string("Could not change font: ") + error.what();
+        settingsStatus = catalog.format("settings.error.font",
+                                        {{"error", error.what()}});
       }
       return;
     }
@@ -1633,15 +2247,27 @@ struct PackageView::Impl {
       settings.fontPath = font.path;
       persistSettings();
     } catch (const std::exception& error) {
-      settingsStatus = std::string("Could not change font: ") + error.what();
+      settingsStatus = catalog.format("settings.error.font",
+                                      {{"error", error.what()}});
     }
   }
 
   std::size_t currentDropdownIndex() const {
+    if (dropdownKind == DropdownKind::language) {
+      const auto current = std::find(dropdownLanguageChoices.begin(),
+                                     dropdownLanguageChoices.end(),
+                                     settings.language);
+      return current == dropdownLanguageChoices.end()
+                 ? 0
+                 : static_cast<std::size_t>(
+                       std::distance(dropdownLanguageChoices.begin(), current));
+    }
     if (dropdownKind == DropdownKind::theme) {
+      const std::string currentTheme = settings.customTheme.empty()
+                                           ? std::string(themeModeName(settings.themeMode))
+                                           : settings.customTheme;
       const auto current = std::find(dropdownThemeChoices.begin(),
-                                     dropdownThemeChoices.end(),
-                                     settings.themeMode);
+                                     dropdownThemeChoices.end(), currentTheme);
       return current == dropdownThemeChoices.end()
                  ? 0
                  : static_cast<std::size_t>(
@@ -1665,13 +2291,20 @@ struct PackageView::Impl {
   }
 
   std::size_t dropdownChoiceCount() const {
-    return dropdownKind == DropdownKind::theme ? dropdownThemeChoices.size()
-                                               : dropdownChoices.size();
+    if (dropdownKind == DropdownKind::theme) return dropdownThemeChoices.size();
+    if (dropdownKind == DropdownKind::language) return dropdownLanguageChoices.size();
+    return dropdownChoices.size();
   }
 
   bool dropdownChoiceIsCurrent(std::size_t index) const {
     if (dropdownKind == DropdownKind::theme) {
-      return dropdownThemeChoices[index] == settings.themeMode;
+      return dropdownThemeChoices[index] ==
+             (settings.customTheme.empty()
+                  ? std::string(themeModeName(settings.themeMode))
+                  : settings.customTheme);
+    }
+    if (dropdownKind == DropdownKind::language) {
+      return dropdownLanguageChoices[index] == settings.language;
     }
     if (dropdownKind == DropdownKind::fontFamily) {
       if (settings.fontPath.empty()) {
@@ -1685,14 +2318,18 @@ struct PackageView::Impl {
 
   std::string dropdownChoiceLabel(std::size_t index) const {
     if (dropdownKind == DropdownKind::theme) {
-      switch (dropdownThemeChoices[index]) {
-        case ThemeMode::system:
-          return "System";
-        case ThemeMode::light:
-          return "Light";
-        case ThemeMode::dark:
-          return "Dark";
-      }
+      const std::string& theme = dropdownThemeChoices[index];
+      if (theme == "system") return catalog.text("theme.system");
+      if (theme == "light") return catalog.text("theme.light");
+      if (theme == "dark") return catalog.text("theme.dark");
+      const auto custom = std::find_if(customThemes.begin(), customThemes.end(),
+          [&theme](const CustomTheme& candidate) { return candidate.path == theme; });
+      if (custom != customThemes.end()) return custom->name;
+      return theme;
+    }
+    if (dropdownKind == DropdownKind::language) {
+      const std::string& language = dropdownLanguageChoices[index];
+      return catalog.text("language." + language);
     }
     return dropdownKind == DropdownKind::fontFamily
                ? dropdownChoices[index].family
@@ -1707,8 +2344,9 @@ struct PackageView::Impl {
 
     dropdownChoices.clear();
     dropdownThemeChoices.clear();
+    dropdownLanguageChoices.clear();
     if (kind == DropdownKind::fontFamily) {
-      dropdownChoices.push_back({"", "System default", ""});
+      dropdownChoices.push_back({"", catalog.text("font.systemDefault"), ""});
       for (const std::string& family : fontFamilies) {
         const auto regular = std::find_if(
             fontFaces.begin(), fontFaces.end(),
@@ -1740,13 +2378,18 @@ struct PackageView::Impl {
         }
       }
     } else if (kind == DropdownKind::theme) {
-      dropdownThemeChoices = {ThemeMode::system, ThemeMode::light, ThemeMode::dark};
+      dropdownThemeChoices = {"system", "light", "dark"};
+      for (const CustomTheme& theme : customThemes) {
+        dropdownThemeChoices.push_back(theme.path);
+      }
+    } else if (kind == DropdownKind::language) {
+      dropdownLanguageChoices = {"system", "en", "ru", "ro"};
     }
     dropdownKind = kind;
     if (dropdownChoiceCount() == 0) {
       dropdownKind = DropdownKind::none;
       dropdownOpen = false;
-      settingsStatus = "No font choices are available.";
+      settingsStatus = catalog.text("settings.noFonts");
       return;
     }
 
@@ -1765,7 +2408,8 @@ struct PackageView::Impl {
         dropdownKind == DropdownKind::fontFamily
             ? layout.fontFamilyButton
             : dropdownKind == DropdownKind::fontStyle ? layout.fontStyleButton
-                                                      : layout.themeButton;
+            : dropdownKind == DropdownKind::language ? layout.languageButton
+                                                     : layout.themeButton;
     const float rowHeight = std::clamp(
         static_cast<float>(renderer.fontSize()) * 1.65F * layout.settingsScale,
         24.0F, 38.0F);
@@ -1788,12 +2432,27 @@ struct PackageView::Impl {
     if (index >= 0 && static_cast<std::size_t>(index) < dropdownChoiceCount()) {
       const std::size_t choiceIndex = static_cast<std::size_t>(index);
       if (dropdownKind == DropdownKind::theme) {
-        settings.themeMode = dropdownThemeChoices[choiceIndex];
-        if (settings.themeMode == ThemeMode::system) {
+        const std::string choice = dropdownThemeChoices[choiceIndex];
+        if (choice == "system" || choice == "light" || choice == "dark") {
+          settings.customTheme.clear();
+          settings.themeMode = choice == "light" ? ThemeMode::light
+                               : choice == "dark" ? ThemeMode::dark
+                                                   : ThemeMode::system;
+        } else {
+          settings.customTheme = choice;
+        }
+        if (settings.customTheme.empty() && settings.themeMode == ThemeMode::system) {
           systemLightTheme = systemPreferredLightTheme().value_or(false);
           nextSystemThemeCheck =
               std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
+        persistSettings();
+      } else if (dropdownKind == DropdownKind::language) {
+        settings.language = dropdownLanguageChoices[choiceIndex];
+        catalog = i18n::Catalog::fromLanguage(
+            settings.language == "system" ? std::string_view{} : settings.language);
+        status = catalog.text("status.initial");
+        settingsStatus.clear();
         persistSettings();
       } else {
         selectFontFace(dropdownChoices[choiceIndex]);
@@ -1814,7 +2473,7 @@ struct PackageView::Impl {
     int height = 0;
     glfwGetFramebufferSize(window, &width, &height);
     const Layout layout =
-        makeLayout(width, height, renderer.fontSize(), settings.compactList);
+        makeLayout(width, height, renderer, settings.compactList);
     const int visibleRows = dropdownGeometry(layout).visibleRows;
     if (dropdownHighlightedIndex < dropdownScroll) {
       dropdownScroll = dropdownHighlightedIndex;
@@ -1829,6 +2488,8 @@ struct PackageView::Impl {
       renderer.useSystemFont();
       renderer.setFontSize(kDefaultFontSize);
       settings = UserSettings{};
+      catalog = i18n::Catalog::fromSystemLocale();
+      status = catalog.text("status.initial");
       previousFontSize = oldFontSize;
       fontSizeTransition = settings.animations ? 0.0F : 1.0F;
       systemLightTheme = systemPreferredLightTheme().value_or(false);
@@ -1836,16 +2497,18 @@ struct PackageView::Impl {
           std::chrono::steady_clock::now() + std::chrono::seconds(3);
       persistSettings();
     } catch (const std::exception& error) {
-      settingsStatus = std::string("Could not reset settings: ") + error.what();
+      settingsStatus = catalog.format("settings.error.reset",
+                                      {{"error", error.what()}});
     }
   }
 
   void persistSettings() {
     try {
       saveSettings(settings);
-      settingsStatus = "Settings saved.";
+      settingsStatus = catalog.text("settings.saved");
     } catch (const std::exception& error) {
-      settingsStatus = std::string("Settings changed, but not saved: ") + error.what();
+      settingsStatus = catalog.format("settings.error.save",
+                                      {{"error", error.what()}});
     }
   }
 
@@ -1875,7 +2538,22 @@ struct PackageView::Impl {
     cursorY = mouseY * static_cast<double>(framebufferHeight) / windowHeight;
     spawnClickSparks();
     const Layout layout = makeLayout(framebufferWidth, framebufferHeight,
-                                     renderer.fontSize(), settings.compactList);
+                                     renderer, settings.compactList);
+
+    if (updatesOpen) {
+      if (contains(layout.cancelUpdateButton, cursorX, cursorY)) {
+        triggerButtonPress(layout.cancelUpdateButton);
+        updatesOpen = false;
+      } else if (contains(layout.confirmUpdateButton, cursorX, cursorY)) {
+        triggerButtonPress(layout.confirmUpdateButton);
+        updatesOpen = false;
+        searchFocused = false;
+        startSystemUpdate();
+      } else if (!contains(layout.updateDialogPanel, cursorX, cursorY)) {
+        updatesOpen = false;
+      }
+      return;
+    }
 
     if (cacheConfirmOpen) {
       if (contains(layout.cancelCacheButton, cursorX, cursorY)) {
@@ -1886,7 +2564,6 @@ struct PackageView::Impl {
       } else if (contains(layout.confirmCacheButton, cursorX, cursorY)) {
         triggerButtonPress(layout.confirmCacheButton);
         cacheConfirmOpen = false;
-        settingsOpen = false;
         dropdownOpen = false;
         searchFocused = false;
         startCacheClear();
@@ -1904,6 +2581,26 @@ struct PackageView::Impl {
       return;
     }
 
+    if (contains(layout.packagesButton, cursorX, cursorY)) {
+      triggerButtonPress(layout.packagesButton);
+      showPackages();
+      return;
+    }
+
+    if (packageManager != pm::Manager::none &&
+        contains(layout.installedButton, cursorX, cursorY)) {
+      triggerButtonPress(layout.installedButton);
+      showInstalled();
+      return;
+    }
+
+    if (packageManager != pm::Manager::none &&
+        contains(layout.updatesButton, cursorX, cursorY)) {
+      triggerButtonPress(layout.updatesButton);
+      showUpdates();
+      return;
+    }
+
     if (contains(layout.settingsButton, cursorX, cursorY)) {
       triggerButtonPress(layout.settingsButton);
       settingsOpen = !settingsOpen;
@@ -1915,18 +2612,28 @@ struct PackageView::Impl {
 
     if (settingsOpen) {
       if (contains(layout.appearanceTab, cursorX, cursorY)) {
+        if (settingsCategory != SettingsCategory::appearance) categoryTransition = 0.0F;
         settingsCategory = SettingsCategory::appearance;
         dropdownOpen = false;
         settingsStatus.clear();
         return;
       }
       if (contains(layout.behaviorTab, cursorX, cursorY)) {
+        if (settingsCategory != SettingsCategory::behavior) categoryTransition = 0.0F;
         settingsCategory = SettingsCategory::behavior;
         dropdownOpen = false;
         settingsStatus.clear();
         return;
       }
+      if (contains(layout.themesTab, cursorX, cursorY)) {
+        if (settingsCategory != SettingsCategory::themes) categoryTransition = 0.0F;
+        settingsCategory = SettingsCategory::themes;
+        dropdownOpen = false;
+        settingsStatus.clear();
+        return;
+      }
       if (contains(layout.systemTab, cursorX, cursorY)) {
+        if (settingsCategory != SettingsCategory::system) categoryTransition = 0.0F;
         settingsCategory = SettingsCategory::system;
         dropdownOpen = false;
         settingsStatus.clear();
@@ -1951,7 +2658,8 @@ struct PackageView::Impl {
                 ? layout.fontFamilyButton
                 : dropdownKind == DropdownKind::fontStyle
                       ? layout.fontStyleButton
-                      : layout.themeButton;
+                : dropdownKind == DropdownKind::language ? layout.languageButton
+                                                         : layout.themeButton;
         if (contains(trigger, cursorX, cursorY)) {
           dropdownOpen = false;
           return;
@@ -1971,7 +2679,41 @@ struct PackageView::Impl {
         } else if (contains(layout.fontStyleButton, cursorX, cursorY)) {
           triggerButtonPress(layout.fontStyleButton);
           openDropdown(DropdownKind::fontStyle);
-        } else if (contains(layout.themeButton, cursorX, cursorY)) {
+        } else if (contains(layout.languageButton, cursorX, cursorY)) {
+          triggerButtonPress(layout.languageButton);
+          openDropdown(DropdownKind::language);
+        } else if (contains(layout.iconSizeDecreaseButton, cursorX, cursorY) ||
+                   contains(layout.iconSizeIncreaseButton, cursorX, cursorY)) {
+          const bool increase = contains(layout.iconSizeIncreaseButton,
+                                         cursorX, cursorY);
+          triggerButtonPress(increase ? layout.iconSizeIncreaseButton
+                                      : layout.iconSizeDecreaseButton);
+          settings.iconScale = std::clamp(
+              std::round((settings.iconScale + (increase ? 0.1F : -0.1F)) * 10.0F) /
+                  10.0F,
+              0.6F, 1.8F);
+          persistSettings();
+        } else if (contains(layout.cornerRadiusDecreaseButton, cursorX, cursorY) ||
+                   contains(layout.cornerRadiusIncreaseButton, cursorX, cursorY)) {
+          const bool increase = contains(layout.cornerRadiusIncreaseButton,
+                                         cursorX, cursorY);
+          triggerButtonPress(increase ? layout.cornerRadiusIncreaseButton
+                                      : layout.cornerRadiusDecreaseButton);
+          settings.cornerRadius = std::clamp(
+              settings.cornerRadius + (increase ? 2.0F : -2.0F), 0.0F, 32.0F);
+          persistSettings();
+        } else if (contains(layout.borderDecreaseButton, cursorX, cursorY) ||
+                   contains(layout.borderIncreaseButton, cursorX, cursorY)) {
+          const bool increase = contains(layout.borderIncreaseButton,
+                                         cursorX, cursorY);
+          triggerButtonPress(increase ? layout.borderIncreaseButton
+                                      : layout.borderDecreaseButton);
+          settings.borderSize = std::clamp(
+              settings.borderSize + (increase ? 0.5F : -0.5F), 0.0F, 6.0F);
+          persistSettings();
+        }
+      } else if (settingsCategory == SettingsCategory::themes) {
+        if (contains(layout.themeButton, cursorX, cursorY)) {
           triggerButtonPress(layout.themeButton);
           openDropdown(DropdownKind::theme);
         }
@@ -1984,7 +2726,7 @@ struct PackageView::Impl {
           triggerButtonPress(layout.smoothScrollButton);
           settings.smoothScroll = !settings.smoothScroll;
           if (!settings.smoothScroll) {
-            scrollPosition = static_cast<float>(scrollOffset);
+            scrollPosition = scrollOffset;
           }
           persistSettings();
         } else if (contains(layout.sparkButton, cursorX, cursorY)) {
@@ -2002,6 +2744,15 @@ struct PackageView::Impl {
           triggerButtonPress(layout.descriptionsButton);
           settings.showPackageDescriptions = !settings.showPackageDescriptions;
           persistSettings();
+        } else if (contains(layout.restoreSearchButton, cursorX, cursorY)) {
+          triggerButtonPress(layout.restoreSearchButton);
+          settings.restoreLastSearch = !settings.restoreLastSearch;
+          if (!settings.restoreLastSearch) {
+            settings.lastSearch.clear();
+          } else {
+            settings.lastSearch = query;
+          }
+          persistSettings();
         }
       } else {
         if (contains(layout.clearCacheButton, cursorX, cursorY)) {
@@ -2015,8 +2766,7 @@ struct PackageView::Impl {
       }
       if (contains(layout.closeSettingsButton, cursorX, cursorY)) {
         triggerButtonPress(layout.closeSettingsButton);
-        settingsOpen = false;
-        dropdownOpen = false;
+        persistSettings();
       } else if (contains(layout.settingsHeaderCloseButton, cursorX, cursorY)) {
         triggerButtonPress(layout.settingsHeaderCloseButton);
         settingsOpen = false;
@@ -2025,14 +2775,16 @@ struct PackageView::Impl {
       return;
     }
 
-    if (layout.showClearQueryButton && clearQueryButtonTransition > 0.5F &&
+    if (view == ViewMode::packages && layout.showClearQueryButton &&
+        clearQueryButtonTransition > 0.5F &&
         contains(layout.clearQueryButton, cursorX, cursorY)) {
       triggerButtonPress(layout.clearQueryButton);
       searchFocused = true;
       clearQuery();
       return;
     }
-    if (contains(layout.searchField, cursorX, cursorY)) {
+    if (view == ViewMode::packages &&
+        contains(layout.searchField, cursorX, cursorY)) {
       searchFocused = true;
       queryCursor = queryPositionAtCursor(layout.queryTextWidth, layout.queryTextX);
       selectionAnchor = queryCursor;
@@ -2040,15 +2792,17 @@ struct PackageView::Impl {
       lastCaretActivity = std::chrono::steady_clock::now();
       return;
     }
-    if (contains(layout.searchButton, cursorX, cursorY)) {
+    if (view != ViewMode::installed &&
+        contains(layout.searchButton, cursorX, cursorY)) {
       triggerButtonPress(layout.searchButton);
       searchFocused = false;
-      startSearch();
+      if (view == ViewMode::updates) updatesOpen = true;
+      else startSearch();
       return;
     }
     if (!busy() && layout.visibleRows > 0 &&
         packages.size() > static_cast<std::size_t>(layout.visibleRows) &&
-        contains(layout.packageScrollbarTrack, cursorX, cursorY)) {
+        contains(scrollbarHoverBounds(layout), cursorX, cursorY)) {
       searchFocused = false;
       draggingPackageScrollbar = true;
       setScrollFromCursor(layout);
@@ -2069,7 +2823,7 @@ struct PackageView::Impl {
         std::min(static_cast<std::size_t>(std::floor(scrollPosition)), packages.size());
     const float fractionalScroll =
         scrollPosition - std::floor(scrollPosition);
-    for (int row = 0; row < layout.visibleRows + (fractionalScroll > 0.0F ? 1 : 0);
+    for (int row = 0; row < layout.drawableRows + (fractionalScroll > 0.0F ? 1 : 0);
          ++row) {
       const std::size_t packageIndex =
           first + static_cast<std::size_t>(row);
@@ -2092,6 +2846,7 @@ struct PackageView::Impl {
         triggerButtonPress(helpButton,
                            "package-help:" + packages[packageIndex].name);
         infoPackage = packages[packageIndex];
+        infoScrollOffset = 0.0F;
         packageInfoOpen = true;
         searchFocused = false;
         return;
@@ -2136,12 +2891,12 @@ struct PackageView::Impl {
     updateAction();
     if (framebufferWidth > 0 && framebufferHeight > 0 && !packages.empty()) {
       const Layout layout = makeLayout(framebufferWidth, framebufferHeight,
-                                       renderer.fontSize(), settings.compactList);
+                                       renderer, settings.compactList);
       const int maxOffset = std::max(
           0, static_cast<int>(packages.size()) - layout.visibleRows);
-      scrollOffset = std::clamp(scrollOffset, 0, maxOffset);
-      scrollPosition =
-          std::min(scrollPosition, static_cast<float>(maxOffset));
+      scrollOffset =
+          std::clamp(scrollOffset, 0.0F, static_cast<float>(maxOffset));
+      scrollPosition = std::min(scrollPosition, static_cast<float>(maxOffset));
     }
     int windowWidth = 0;
     int windowHeight = 0;
@@ -2156,7 +2911,7 @@ struct PackageView::Impl {
     if (draggingSearchSelection) {
       if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
         const Layout layout = makeLayout(framebufferWidth, framebufferHeight,
-                                         renderer.fontSize(), settings.compactList);
+                                         renderer, settings.compactList);
         queryCursor = queryPositionAtCursor(
             layout.queryTextWidth,
             layout.queryTextX);
@@ -2168,7 +2923,7 @@ struct PackageView::Impl {
       if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS &&
           !settingsOpen && !busy()) {
         const Layout layout = makeLayout(framebufferWidth, framebufferHeight,
-                                         renderer.fontSize(), settings.compactList);
+                                         renderer, settings.compactList);
         setScrollFromCursor(layout);
       } else {
         draggingPackageScrollbar = false;
@@ -2182,6 +2937,20 @@ struct PackageView::Impl {
     frameDeltaSeconds = std::clamp(
         std::chrono::duration<float>(now - lastUpdateTime).count(), 0.0F, 0.05F);
     lastUpdateTime = now;
+    if (packageListExiting) {
+      const float exitDuration = std::clamp(
+          frameDeltaSeconds * 6.0F, 0.07F, 0.13F);
+      packageListTransition = std::max(
+          0.0F, packageListTransition - frameDeltaSeconds / exitDuration);
+      if (packageListTransition <= 0.0F) {
+        packages.clear();
+        packageAppearanceStarts.clear();
+        packageListExiting = false;
+        packageListTransition = 1.0F;
+        scrollOffset = 0.0F;
+        scrollPosition = 0.0F;
+      }
+    }
     if (settings.themeMode == ThemeMode::system && now >= nextSystemThemeCheck) {
       if (const std::optional<bool> preference = systemPreferredLightTheme()) {
         systemLightTheme = *preference;
@@ -2207,8 +2976,9 @@ struct PackageView::Impl {
     infoTransition = std::clamp(infoTransition, 0.0F, 1.0F);
     const float clearBlend = 1.0F - std::exp(-frameDeltaSeconds * 22.0F);
     const bool clearButtonVisible =
-        !query.empty() && framebufferWidth > 0 && framebufferHeight > 0 &&
-        makeLayout(framebufferWidth, framebufferHeight, renderer.fontSize(),
+        view == ViewMode::packages && !query.empty() && framebufferWidth > 0 &&
+        framebufferHeight > 0 &&
+        makeLayout(framebufferWidth, framebufferHeight, renderer,
                    settings.compactList)
             .showClearQueryButton;
     clearQueryButtonTransition +=
@@ -2219,18 +2989,17 @@ struct PackageView::Impl {
         (1.0F - fontSizeTransition) * (settings.animations ? fontBlend : 1.0F);
     fontSizeTransition = std::clamp(fontSizeTransition, 0.0F, 1.0F);
     if (framebufferWidth > 0 && framebufferHeight > 0) {
-      updateCursor(makeLayout(framebufferWidth, framebufferHeight,
-                              renderer.fontSize(), settings.compactList));
+      updateCursor(makeLayout(framebufferWidth, framebufferHeight, renderer,
+                              settings.compactList));
     }
     if (settings.smoothScroll) {
-      const float scrollBlend = 1.0F - std::exp(-frameDeltaSeconds * 20.0F);
-      scrollPosition +=
-          (static_cast<float>(scrollOffset) - scrollPosition) * scrollBlend;
-      if (std::abs(scrollPosition - static_cast<float>(scrollOffset)) < 0.005F) {
-        scrollPosition = static_cast<float>(scrollOffset);
+      const float scrollBlend = 1.0F - std::exp(-frameDeltaSeconds * 30.0F);
+      scrollPosition += (scrollOffset - scrollPosition) * scrollBlend;
+      if (std::abs(scrollPosition - scrollOffset) < 0.005F) {
+        scrollPosition = scrollOffset;
       }
     } else {
-      scrollPosition = static_cast<float>(scrollOffset);
+      scrollPosition = scrollOffset;
     }
     if (settings.animations) {
       const float settingsBlend = 1.0F - std::exp(-frameDeltaSeconds * 32.0F);
@@ -2249,6 +3018,9 @@ struct PackageView::Impl {
       settingsTransition = settingsOpen ? 1.0F : 0.0F;
       dropdownTransition = dropdownOpen ? 1.0F : 0.0F;
     }
+    categoryTransition = std::min(
+        1.0F, categoryTransition + frameDeltaSeconds *
+                  (settings.animations ? 7.5F : 100.0F));
     if (!dropdownOpen && dropdownTransition < 0.005F) {
       dropdownKind = DropdownKind::none;
       dropdownChoices.clear();
@@ -2274,31 +3046,27 @@ struct PackageView::Impl {
     handleClick(framebufferWidth, framebufferHeight);
   }
 
-  static std::string shortened(std::string value, std::size_t maxCharacters) {
-    if (maxCharacters == 0) {
-      return {};
-    }
-    std::size_t offset = 0;
-    std::size_t characters = 0;
-    while (offset < value.size() && characters < maxCharacters) {
+  std::string fitText(std::string value, float maxWidth) const {
+    if (maxWidth <= 0.0F) return {};
+    if (renderer.measureText(value) <= maxWidth) return value;
+    constexpr std::string_view ellipsis = "…";
+    const float ellipsisWidth = renderer.measureText(ellipsis);
+    if (ellipsisWidth > maxWidth) return {};
+    std::vector<std::size_t> boundaries{0};
+    for (std::size_t offset = 0; offset < value.size();) {
       offset = nextCodepointPosition(value, offset);
-      ++characters;
+      boundaries.push_back(offset);
     }
-    if (offset < value.size()) {
-      if (maxCharacters > 3) {
-        offset = 0;
-        characters = 0;
-        while (offset < value.size() && characters < maxCharacters - 3) {
-          offset = nextCodepointPosition(value, offset);
-          ++characters;
-        }
-        value.resize(offset);
-        value += "...";
-      } else {
-        value.resize(offset);
-      }
+    std::size_t low = 0;
+    std::size_t high = boundaries.size() - 1;
+    while (low < high) {
+      const std::size_t middle = low + (high - low + 1) / 2;
+      const std::string candidate = value.substr(0, boundaries[middle]) +
+                                    std::string(ellipsis);
+      if (renderer.measureText(candidate) <= maxWidth) low = middle;
+      else high = middle - 1;
     }
-    return value;
+    return value.substr(0, boundaries[low]) + std::string(ellipsis);
   }
 
   std::string buttonKey(const Bounds& bounds) const {
@@ -2362,35 +3130,53 @@ struct PackageView::Impl {
         }
       }
     }
-    addButtonSurface(rectangles, bounds, fill, border, hoverAmount, pressAmount);
+    // Keep hit testing on stable bounds while animating the drawn button.
+    const float visualScale = 1.0F + hoverAmount * 0.025F - pressAmount * 0.035F;
+    const float centerX = bounds.x + bounds.width * 0.5F;
+    const float centerY = bounds.y + bounds.height * 0.5F;
+    const Bounds visualBounds{
+        centerX - bounds.width * visualScale * 0.5F,
+        centerY - bounds.height * visualScale * 0.5F,
+        bounds.width * visualScale, bounds.height * visualScale};
+    addButtonSurface(rectangles, visualBounds, fill, border, hoverAmount, pressAmount);
     if (pressAmount > 0.0F) {
-      addRoundedRect(rectangles, bounds, border, 12.0F, pressAmount * 0.12F);
+      addRoundedRect(rectangles, visualBounds, border,
+                     std::min(12.0F, visualBounds.height * 0.5F),
+                     pressAmount * 0.12F);
     }
     if (rippleOpacity > 0.0F) {
       addRoundedRect(rectangles, rippleBounds, border,
                      rippleBounds.width * 0.5F, rippleOpacity);
     }
 
-    const float iconScale = label.empty() ? 0.68F : 0.38F;
-    const float iconSize =
+    const float iconRatio = (label.empty() ? 0.82F : 0.50F) * settings.iconScale;
+    float iconSize =
         icon.empty() ? 0.0F
-                     : std::min({24.0F, bounds.height * iconScale,
-                                 bounds.width * iconScale});
+                     : std::min({32.0F, bounds.height * iconRatio,
+                                 bounds.width * iconRatio});
+    const float gap = iconSize > 0.0F && !label.empty() ? 7.0F : 0.0F;
+    if (!label.empty()) {
+      label = fitText(std::move(label),
+                      std::max(0.0F, bounds.width - iconSize - gap - 16.0F));
+    }
     const float textWidth = label.empty() ? 0.0F : renderer.measureText(label);
-    const float gap = iconSize > 0.0F && textWidth > 0.0F ? 7.0F : 0.0F;
     const float contentWidth = iconSize + gap + textWidth;
-    float contentX =
-        bounds.x + std::max(0.0F, (bounds.width - contentWidth) * 0.5F);
+    float contentX = visualBounds.x +
+        std::max(0.0F, (visualBounds.width - contentWidth) * 0.5F);
     if (iconSize > 0.0F) {
-      const float iconY = bounds.y + (bounds.height - iconSize) * 0.5F;
-      images.push_back(
-          {iconPath(icon), contentX, iconY, iconSize, iconSize, 1.0F});
+      const float iconY = visualBounds.y + (visualBounds.height - iconSize) * 0.5F;
+      render::ImageItem image{
+          iconPath(icon), contentX, iconY, iconSize, iconSize, 1.0F};
+      if (std::filesystem::path(icon).extension() == ".svg") {
+        image.tint = textColor;
+        image.themed = true;
+      }
+      images.push_back(std::move(image));
       contentX += iconSize + gap;
     }
     if (!label.empty()) {
       text.push_back({std::move(label), contentX,
-                      bounds.y + bounds.height / 2.0F +
-                          static_cast<float>(renderer.fontSize()) * 0.34F,
+                      renderer.baselineForCenter(visualBounds.y + visualBounds.height * 0.5F),
                       textColor});
     }
     opacity = std::clamp(opacity, 0.0F, 1.0F);
@@ -2513,7 +3299,7 @@ struct PackageView::Impl {
       lines.push_back(std::move(line));
     }
     if (lines.empty()) {
-      lines.emplace_back("No description provided.");
+      lines.push_back(catalog.text("info.noDescription"));
     }
     return lines;
   }
@@ -2574,22 +3360,23 @@ struct PackageView::Impl {
       }
 
       const std::string label = dropdownChoiceLabel(index);
-      const float indicatorSize = std::min(18.0F, geometry.rowHeight * 0.58F);
+      const float indicatorSize =
+          std::min({32.0F, geometry.rowHeight * 0.80F,
+                    18.0F * settings.iconScale});
       const float labelWidth =
           std::max(0.0F, rowBounds.width - indicatorSize - 28.0F);
       text.push_back(
-          {shortened(label, static_cast<std::size_t>(
-                                labelWidth / queryCharacterWidth())),
+          {fitText(label, labelWidth),
            rowBounds.x + 12.0F,
-           rowBounds.y + rowBounds.height / 2.0F +
-               static_cast<float>(renderer.fontSize()) * 0.34F,
+           renderer.baselineForCenter(rowBounds.y + rowBounds.height * 0.5F),
            palette.text, dropdownTransition});
       if (currentChoice) {
         images.push_back(
-            {iconPath("done.png"),
+            {iconPath("done.svg"),
              rowBounds.x + rowBounds.width - indicatorSize - 10.0F,
              rowBounds.y + (rowBounds.height - indicatorSize) / 2.0F,
-             indicatorSize, indicatorSize, dropdownTransition});
+             indicatorSize, indicatorSize, dropdownTransition, false,
+             palette.primary, true});
       }
     }
     if (choiceCount >
@@ -2631,16 +3418,28 @@ struct PackageView::Impl {
                                 panel.width - 3.0F, panel.height - 3.0F},
                    palette.surface, 26.0F);
 
-    if (!cacheConfirmOpen) {
-      text.push_back({"Settings", panel.x + 30.0F, panel.y + 44.0F * scale,
+    {
+      const std::string settingsTitle = catalog.text("settings.header");
+      text.push_back({fitText(settingsTitle,
+                              layout.settingsHeaderCloseButton.x - panel.x - 48.0F),
+                      panel.x + 30.0F,
+                      panel.y + 44.0F * scale,
                       palette.text});
+      if (!settingsStatus.empty()) {
+        const float titleEnd = panel.x + 30.0F + renderer.measureText(settingsTitle);
+        const float statusRight = layout.settingsHeaderCloseButton.x - 8.0F;
+        const float statusWidth = std::max(0.0F, statusRight - titleEnd - 16.0F);
+        const std::string fittedStatus = fitText(settingsStatus, statusWidth);
+        text.push_back({fittedStatus,
+                        statusRight - renderer.measureText(fittedStatus),
+                        panel.y + 44.0F * scale, palette.secondaryText});
+      }
       drawButton(rectangles, text, images, layout.settingsHeaderCloseButton, "",
-                 palette.elevated, palette.outline, palette.text, "close.png");
+                 palette.elevated, palette.outline, palette.text, "close.svg");
       const bool narrowPanel = panel.width < 500.0F;
       const std::string appearanceLabel =
-          narrowPanel ? "Look" : "Appearance";
-      const std::string behaviorLabel =
-          narrowPanel ? "Behavior" : "Behavior";
+          catalog.text(narrowPanel ? "settings.look" : "settings.appearance");
+      const std::string behaviorLabel = catalog.text("settings.behavior");
       const auto tabFill = [&palette](bool selected) {
         return selected ? palette.primaryContainer : palette.elevated;
       };
@@ -2656,15 +3455,32 @@ struct PackageView::Impl {
                  tabFill(settingsCategory == SettingsCategory::behavior),
                  tabBorder(settingsCategory == SettingsCategory::behavior),
                  palette.text);
-      drawButton(rectangles, text, images, layout.systemTab, "System",
+      drawButton(rectangles, text, images, layout.themesTab,
+                 catalog.text("settings.themes"),
+                 tabFill(settingsCategory == SettingsCategory::themes),
+                 tabBorder(settingsCategory == SettingsCategory::themes),
+                 palette.text);
+      drawButton(rectangles, text, images, layout.systemTab,
+                 catalog.text("settings.system"),
                  tabFill(settingsCategory == SettingsCategory::system),
                  tabBorder(settingsCategory == SettingsCategory::system),
                  palette.text);
 
-      if (settingsCategory == SettingsCategory::appearance) {
-        text.push_back({narrowPanel ? "Font" : "Font size",
-                        panel.x + 24.0F, panel.y + 130.0F * scale,
+      const std::size_t categoryRectangleStart = rectangles.size();
+      const std::size_t categoryTextStart = text.size();
+      const std::size_t categoryImageStart = images.size();
+      const float settingLabelX = panel.x + 30.0F;
+      const auto addSettingLabel = [&](std::string label, const Bounds& control) {
+        const float available = std::max(0.0F, control.x - settingLabelX - 12.0F);
+        text.push_back({fitText(std::move(label), available), settingLabelX,
+                        renderer.baselineForCenter(control.y + control.height * 0.5F),
                         palette.secondaryText});
+      };
+
+      if (settingsCategory == SettingsCategory::appearance) {
+        addSettingLabel(catalog.text(narrowPanel ? "settings.font"
+                                                 : "settings.fontSize"),
+                        layout.decreaseFontButton);
         const float fontProgress =
             settings.animations ? fontSizeTransition : 1.0F;
         const std::string currentSize =
@@ -2672,90 +3488,154 @@ struct PackageView::Impl {
         const std::string previousSize =
             std::to_string(previousFontSize) + " px";
         if (fontProgress < 1.0F) {
-          text.push_back({previousSize, layout.fontSizeValueX,
-                          panel.y + (124.0F - 6.0F * fontProgress) * scale,
+          text.push_back({previousSize,
+                          layout.fontSizeValueCenterX -
+                              renderer.measureText(previousSize) * 0.5F,
+                          renderer.baselineForCenter(
+                              layout.decreaseFontButton.y +
+                              layout.decreaseFontButton.height * 0.5F) -
+                              6.0F * fontProgress * scale,
                           palette.secondaryText, 1.0F - fontProgress});
         }
-        text.push_back({currentSize, layout.fontSizeValueX,
-                        panel.y + (130.0F + 6.0F * (1.0F - fontProgress)) * scale,
+        text.push_back({currentSize,
+                        layout.fontSizeValueCenterX -
+                            renderer.measureText(currentSize) * 0.5F,
+                        renderer.baselineForCenter(
+                            layout.decreaseFontButton.y +
+                            layout.decreaseFontButton.height * 0.5F) +
+                            6.0F * (1.0F - fontProgress) * scale,
                         palette.text, fontProgress});
-        text.push_back({narrowPanel ? "Face" : "Font family",
-                        panel.x + (narrowPanel ? 24.0F : 30.0F),
-                        panel.y + 176.0F * scale, palette.secondaryText});
-        text.push_back({narrowPanel ? "Style" : "Font style",
-                        panel.x + (narrowPanel ? 24.0F : 30.0F),
-                        panel.y + 224.0F * scale, palette.secondaryText});
-        text.push_back({"Theme", panel.x + 30.0F,
-                        panel.y + 272.0F * scale, palette.secondaryText});
+        addSettingLabel(catalog.text(narrowPanel ? "settings.fontFace"
+                                                 : "settings.fontFamily"),
+                        layout.fontFamilyButton);
+        addSettingLabel(catalog.text(narrowPanel ? "settings.style"
+                                                 : "settings.fontStyle"),
+                        layout.fontStyleButton);
+        addSettingLabel(catalog.text("settings.language"), layout.languageButton);
+        addSettingLabel(catalog.text("settings.iconSize"),
+                        layout.iconSizeDecreaseButton);
+        addSettingLabel(catalog.text("settings.cornerRadius"),
+                        layout.cornerRadiusDecreaseButton);
+        addSettingLabel(catalog.text("settings.borderSize"),
+                        layout.borderDecreaseButton);
+        const std::string iconSizeValue =
+            std::to_string(static_cast<int>(std::round(settings.iconScale * 100.0F))) + "%";
+        const std::string radiusValue =
+            std::to_string(static_cast<int>(settings.cornerRadius));
+        std::ostringstream borderValueStream;
+        borderValueStream << std::fixed << std::setprecision(1) << settings.borderSize;
+        const std::string borderValue = borderValueStream.str();
+        const float styleValueCenter =
+            (layout.iconSizeDecreaseButton.x +
+             layout.iconSizeDecreaseButton.width +
+             layout.iconSizeIncreaseButton.x) * 0.5F;
+        text.push_back({iconSizeValue,
+                        styleValueCenter - renderer.measureText(iconSizeValue) * 0.5F,
+                        renderer.baselineForCenter(
+                            layout.iconSizeDecreaseButton.y +
+                            layout.iconSizeDecreaseButton.height * 0.5F),
+                        palette.text});
+        text.push_back({radiusValue,
+                        styleValueCenter - renderer.measureText(radiusValue) * 0.5F,
+                        renderer.baselineForCenter(
+                            layout.cornerRadiusDecreaseButton.y +
+                            layout.cornerRadiusDecreaseButton.height * 0.5F),
+                        palette.text});
+        text.push_back({borderValue,
+                        styleValueCenter - renderer.measureText(borderValue) * 0.5F,
+                        renderer.baselineForCenter(
+                            layout.borderDecreaseButton.y +
+                            layout.borderDecreaseButton.height * 0.5F),
+                        palette.text});
       } else if (settingsCategory == SettingsCategory::behavior) {
-        text.push_back({"Compact list", panel.x + 30.0F,
-                        panel.y + 140.0F * scale, palette.secondaryText});
-        text.push_back({"Smooth scrolling", panel.x + 30.0F,
-                        panel.y + 196.0F * scale, palette.secondaryText});
-        text.push_back({"Click sparks", panel.x + 30.0F,
-                        panel.y + 252.0F * scale, palette.secondaryText});
-        text.push_back({"Animations", panel.x + 30.0F,
-                        panel.y + 308.0F * scale, palette.secondaryText});
-        text.push_back({narrowPanel ? "Descriptions" : "Package descriptions",
+        addSettingLabel(catalog.text("settings.compactList"), layout.densityButton);
+        addSettingLabel(catalog.text("settings.smoothScrolling"),
+                        layout.smoothScrollButton);
+        addSettingLabel(catalog.text("settings.clickSparks"), layout.sparkButton);
+        addSettingLabel(catalog.text("settings.animations"), layout.animationButton);
+        addSettingLabel(catalog.text(narrowPanel ? "settings.descriptions"
+                                                 : "settings.packageDescriptions"),
+                        layout.descriptionsButton);
+        addSettingLabel(catalog.text("settings.restoreSearch"),
+                        layout.restoreSearchButton);
+      } else if (settingsCategory == SettingsCategory::themes) {
+        text.push_back({fitText(catalog.text("settings.themesDescription"),
+                                panel.width - 60.0F),
                         panel.x + 30.0F,
-                        panel.y + 364.0F * scale, palette.secondaryText});
+                        panel.y + 104.0F * scale + layout.settingsContentOffset,
+                        palette.secondaryText});
+        text.push_back({fitText(catalog.text("settings.themeFolder"),
+                                panel.width - 60.0F),
+                        panel.x + 30.0F,
+                        panel.y + 208.0F * scale + layout.settingsContentOffset,
+                        palette.secondaryText});
+        text.push_back({fitText("~/.config/flux/themes/", panel.width - 60.0F),
+                        panel.x + 30.0F,
+                        panel.y + 236.0F * scale + layout.settingsContentOffset,
+                        palette.text});
       } else {
-        text.push_back({shortened("System theme follows the desktop preference.",
-                                  static_cast<std::size_t>(
-                                      std::max(1.0F, (panel.width - 48.0F) /
-                                                        queryCharacterWidth()))),
-                        panel.x + 24.0F, panel.y + 100.0F * scale,
+        text.push_back({fitText(catalog.text("settings.systemThemeDescription"),
+                                panel.width - 60.0F),
+                        panel.x + 30.0F,
+                        panel.y + 100.0F * scale + layout.settingsContentOffset,
                         palette.secondaryText});
-        text.push_back({"Package cache", panel.x + 24.0F,
-                        panel.y + 142.0F * scale, palette.secondaryText});
-        text.push_back({shortened("Reset appearance and behavior settings.",
-                                  static_cast<std::size_t>(
-                                      std::max(1.0F, (panel.width - 48.0F) /
-                                                        queryCharacterWidth()))),
-                        panel.x + 24.0F, panel.y + 272.0F * scale,
+        text.push_back({fitText(catalog.text("settings.packageCache"),
+                                panel.width - 60.0F), panel.x + 30.0F,
+                        panel.y + 142.0F * scale + layout.settingsContentOffset,
                         palette.secondaryText});
-      }
-
-      if (!settingsStatus.empty()) {
-        text.push_back(
-            {shortened(settingsStatus,
-                       static_cast<std::size_t>((panel.width - 48.0F) /
-                                                std::max(1.0F, renderer.fontSize() * 0.55F))),
-             panel.x + 24.0F, panel.y + 424.0F * scale, palette.secondaryText});
+        text.push_back({fitText(catalog.text("settings.resetDescription"),
+                                panel.width - 60.0F),
+                        panel.x + 30.0F,
+                        panel.y + 216.0F * scale + layout.settingsContentOffset,
+                        palette.secondaryText});
       }
 
       if (settingsCategory == SettingsCategory::appearance) {
-        const float buttonCharacterWidth =
-            std::max(1.0F, static_cast<float>(renderer.fontSize()) * 0.55F);
-        const std::size_t familyLabelLimit = static_cast<std::size_t>(
-            std::max(1.0F, (layout.fontFamilyButton.width - 24.0F) /
-                               buttonCharacterWidth));
-        const std::size_t styleLabelLimit = static_cast<std::size_t>(
-            std::max(1.0F, (layout.fontStyleButton.width - 24.0F) /
-                               buttonCharacterWidth));
-        const std::size_t familyNameLimit =
-            familyLabelLimit > 2 ? familyLabelLimit - 2 : familyLabelLimit;
-        const std::size_t styleNameLimit =
-            styleLabelLimit > 2 ? styleLabelLimit - 2 : styleLabelLimit;
         const std::string dropdownArrow = "\xE2\x96\xBE";
         std::string familyLabel =
-            shortened(renderer.fontFamily(), familyNameLimit);
-        std::string styleLabel = shortened(renderer.fontStyle(), styleNameLimit);
+            fitText(renderer.fontFamily(), layout.fontFamilyButton.width - 32.0F);
+        std::string styleLabel =
+            fitText(renderer.fontStyle(), layout.fontStyleButton.width - 32.0F);
         familyLabel += " " + dropdownArrow;
         styleLabel += " " + dropdownArrow;
-        std::string themeLabel(themeModeLabel(settings.themeMode));
-        themeLabel += " " + dropdownArrow;
+        const std::string languageLabel =
+            catalog.text("language." + settings.language) + " " + dropdownArrow;
 
         drawButton(rectangles, text, images, layout.decreaseFontButton, "",
-                   palette.elevated, palette.outline, palette.text, "remove.png");
+                   palette.elevated, palette.outline, palette.text, "remove.svg");
         drawButton(rectangles, text, images, layout.increaseFontButton, "",
-                   palette.elevated, palette.outline, palette.text, "add.png");
+                   palette.elevated, palette.outline, palette.text, "add.svg");
         drawButton(rectangles, text, images, layout.fontFamilyButton,
                    std::move(familyLabel), palette.elevated, palette.outline,
                    palette.text);
         drawButton(rectangles, text, images, layout.fontStyleButton,
                    std::move(styleLabel), palette.elevated, palette.outline,
                    palette.text);
+        drawButton(rectangles, text, images, layout.languageButton,
+                   languageLabel, palette.elevated, palette.outline,
+                   palette.text);
+        drawButton(rectangles, text, images, layout.iconSizeDecreaseButton,
+                   "−", palette.elevated, palette.outline, palette.text);
+        drawButton(rectangles, text, images, layout.iconSizeIncreaseButton,
+                   "+", palette.elevated, palette.outline, palette.text);
+        drawButton(rectangles, text, images, layout.cornerRadiusDecreaseButton,
+                   "-", palette.elevated, palette.outline, palette.text);
+        drawButton(rectangles, text, images, layout.cornerRadiusIncreaseButton,
+                   "+", palette.elevated, palette.outline, palette.text);
+        drawButton(rectangles, text, images, layout.borderDecreaseButton,
+                   "-", palette.elevated, palette.outline, palette.text);
+        drawButton(rectangles, text, images, layout.borderIncreaseButton,
+                   "+", palette.elevated, palette.outline, palette.text);
+      } else if (settingsCategory == SettingsCategory::themes) {
+        std::string themeLabel =
+            fitText(currentThemeName(), layout.themeButton.width - 32.0F);
+        themeLabel += " " + std::string("\xE2\x96\xBE");
+        text.push_back({fitText(catalog.text("settings.theme"),
+                                layout.themeButton.x - panel.x - 36.0F),
+                        panel.x + 24.0F,
+                        renderer.baselineForCenter(
+                            layout.themeButton.y - 16.0F * scale),
+                        palette.text});
         drawButton(rectangles, text, images, layout.themeButton,
                    std::move(themeLabel), palette.elevated, palette.outline,
                    palette.text);
@@ -2771,58 +3651,147 @@ struct PackageView::Impl {
         drawSwitch(rectangles, layout.descriptionsButton,
                    "package-descriptions", settings.showPackageDescriptions,
                    scale, palette);
+        drawSwitch(rectangles, layout.restoreSearchButton, "restore-last-search",
+                   settings.restoreLastSearch, scale, palette);
       } else {
-        drawButton(rectangles, text, images, layout.clearCacheButton, "Clear",
+        drawButton(rectangles, text, images, layout.clearCacheButton,
+                   catalog.text("settings.clear"),
                    {0.38F, 0.20F, 0.23F}, {0.64F, 0.33F, 0.38F},
-                   {1.0F, 0.88F, 0.89F}, "delete.png");
+                   {1.0F, 0.88F, 0.89F}, "delete.svg");
         drawButton(rectangles, text, images, layout.resetSettingsButton,
-                   "Reset settings", palette.elevated, palette.outline,
+                   catalog.text("settings.reset"), palette.elevated, palette.outline,
                    palette.text);
       }
-      drawButton(rectangles, text, images, layout.closeSettingsButton, "Done",
+      const float categoryOpacity = std::clamp(categoryTransition, 0.0F, 1.0F);
+      const float categoryOffset = (1.0F - categoryOpacity) * 10.0F * scale;
+      for (std::size_t index = categoryRectangleStart; index < rectangles.size(); ++index) {
+        rectangles[index].y += categoryOffset;
+        rectangles[index].opacity *= categoryOpacity;
+      }
+      for (std::size_t index = categoryTextStart; index < text.size(); ++index) {
+        text[index].baseline += categoryOffset;
+        text[index].opacity *= categoryOpacity;
+      }
+      for (std::size_t index = categoryImageStart; index < images.size(); ++index) {
+        images[index].y += categoryOffset;
+        images[index].opacity *= categoryOpacity;
+      }
+      drawButton(rectangles, text, images, layout.closeSettingsButton,
+                 catalog.text("settings.done"),
                  palette.primaryContainer, palette.primary, palette.text,
-                 "done.png");
-    } else {
-      const Bounds& confirmation = layout.cacheConfirmPanel;
-      const float confirmationScale = layout.confirmScale;
-      addRoundedRect(rectangles,
-                     {confirmation.x, confirmation.y + 6.0F, confirmation.width,
-                      confirmation.height},
-                     themeIsLight() ? std::array<float, 3>{0.76F, 0.74F, 0.79F}
-                                    : std::array<float, 3>{0.035F, 0.03F, 0.05F},
-                     24.0F);
-      addRoundedRect(rectangles, confirmation, palette.outline, 24.0F);
-      addRoundedRect(rectangles, {confirmation.x + 1.5F, confirmation.y + 1.5F,
-                                  confirmation.width - 3.0F,
-                                  confirmation.height - 3.0F},
-                     palette.surface, 22.0F);
-      const std::size_t confirmationTextLength =
-          static_cast<std::size_t>(std::max(
-              1.0F, (confirmation.width - 48.0F) / queryCharacterWidth()));
-      text.push_back({shortened("Clear the entire package cache?",
-                                confirmationTextLength),
-                      confirmation.x + 24.0F,
-                      confirmation.y + 48.0F * confirmationScale, palette.text});
-      const std::string cacheEffect =
-          packageManager == pm::Manager::dnf
-              ? "Removes cached packages and repository metadata."
-              : "Removes downloaded pacman packages.";
-      text.push_back({shortened(cacheEffect, confirmationTextLength),
-                      confirmation.x + 24.0F, confirmation.y + 94.0F * confirmationScale,
-                      palette.secondaryText});
-      const std::string cacheLocation =
-          packageManager == pm::Manager::dnf ? "Location: /var/cache/dnf"
-                                             : "Location: /var/cache/pacman/pkg";
-      text.push_back({shortened(cacheLocation,
-                                confirmationTextLength),
-                      confirmation.x + 24.0F, confirmation.y + 124.0F * confirmationScale,
-                      palette.secondaryText});
-      drawButton(rectangles, text, images, layout.cancelCacheButton, "Cancel",
-                 palette.elevated, palette.outline, palette.text, "close.png");
-      drawButton(rectangles, text, images, layout.confirmCacheButton, "Clear",
-                 {0.45F, 0.17F, 0.20F}, {0.68F, 0.30F, 0.34F},
-                 {1.0F, 0.90F, 0.91F}, "delete.png");
+                 "done.svg");
     }
+  }
+
+  void drawCacheConfirmation(int width, int height, const Layout& layout,
+                             const Palette& palette) const {
+    std::vector<render::RectItem> rectangles;
+    std::vector<render::TextItem> text;
+    std::vector<render::ImageItem> images;
+    const Bounds& panel = layout.cacheConfirmPanel;
+    const float scale = layout.confirmScale;
+    addRoundedRect(rectangles,
+                   {0.0F, 0.0F, static_cast<float>(width),
+                    static_cast<float>(height)},
+                   {0.01F, 0.015F, 0.025F}, 0.0F, 0.46F);
+    addRoundedRect(rectangles,
+                   {panel.x, panel.y + 6.0F, panel.width, panel.height},
+                   themeIsLight() ? std::array<float, 3>{0.76F, 0.74F, 0.79F}
+                                  : std::array<float, 3>{0.035F, 0.03F, 0.05F},
+                   24.0F);
+    addRoundedRect(rectangles, panel, palette.outline, 24.0F);
+    addRoundedRect(rectangles,
+                   {panel.x + 1.5F, panel.y + 1.5F,
+                    panel.width - 3.0F, panel.height - 3.0F},
+                   palette.surface, 22.0F);
+
+    const float inset = std::min(24.0F, panel.width * 0.08F);
+    const float lineHeight = std::max(16.0F, renderer.fontSize() * 1.25F);
+    const float titleBaseline = panel.y + 46.0F * scale;
+    const float bodyStart = panel.y + 82.0F * scale;
+    const float bodyEnd = layout.cancelCacheButton.y - 10.0F;
+    const int maxBodyLines = std::max(
+        1, static_cast<int>((bodyEnd - bodyStart) / lineHeight));
+    const float bodyWidth = std::max(1.0F, panel.width - inset * 2.0F);
+    const std::string title = fitText(catalog.text("cache.confirmTitle"), bodyWidth);
+    text.push_back({title, panel.x + inset, titleBaseline, palette.text});
+
+    const std::string details = catalog.text(
+        packageManager == pm::Manager::dnf ? "cache.details.dnf"
+                                           : "cache.details.pacman");
+    const std::string location = catalog.text(
+        packageManager == pm::Manager::dnf ? "cache.location.dnf"
+                                           : "cache.location.pacman");
+    std::vector<std::string> bodyLines = wrappedText(details, bodyWidth);
+    const std::vector<std::string> locationLines = wrappedText(location, bodyWidth);
+    bodyLines.insert(bodyLines.end(), locationLines.begin(), locationLines.end());
+    if (bodyLines.size() > static_cast<std::size_t>(maxBodyLines)) {
+      bodyLines.resize(static_cast<std::size_t>(maxBodyLines));
+    }
+    for (std::size_t index = 0; index < bodyLines.size(); ++index) {
+      text.push_back({std::move(bodyLines[index]), panel.x + inset,
+                      bodyStart + static_cast<float>(index) * lineHeight,
+                      palette.secondaryText});
+    }
+    drawButton(rectangles, text, images, layout.cancelCacheButton,
+               catalog.text("button.cancel"), palette.elevated,
+               palette.outline, palette.text, "close.svg");
+    drawButton(rectangles, text, images, layout.confirmCacheButton,
+               catalog.text("button.clear"), {0.45F, 0.17F, 0.20F},
+               {0.68F, 0.30F, 0.34F}, {1.0F, 0.90F, 0.91F}, "delete.svg");
+    applyVisualSettings(rectangles);
+    renderer.drawOverlay(width, height, rectangles, text, images);
+  }
+
+  void drawUpdateDialog(int width, int height, const Layout& layout,
+                        const Palette& palette) const {
+    std::vector<render::RectItem> rectangles;
+    std::vector<render::TextItem> text;
+    std::vector<render::ImageItem> images;
+    const Bounds& panel = layout.updateDialogPanel;
+    const float scale = layout.confirmScale;
+    addRoundedRect(rectangles,
+                   {0.0F, 0.0F, static_cast<float>(width),
+                    static_cast<float>(height)},
+                   {0.01F, 0.015F, 0.025F}, 0.0F, 0.48F);
+    addRoundedRect(rectangles,
+                   {panel.x, panel.y + 6.0F, panel.width, panel.height},
+                   themeIsLight() ? std::array<float, 3>{0.76F, 0.74F, 0.79F}
+                                  : std::array<float, 3>{0.035F, 0.03F, 0.05F},
+                   24.0F);
+    addRoundedRect(rectangles, panel, palette.outline, 24.0F);
+    addRoundedRect(rectangles,
+                   {panel.x + 1.5F, panel.y + 1.5F,
+                    panel.width - 3.0F, panel.height - 3.0F},
+                   palette.surface, 22.0F);
+
+    const float inset = std::min(24.0F, panel.width * 0.08F);
+    const std::string managerName =
+        packageManager == pm::Manager::dnf ? "DNF" : "pacman";
+    const std::string details = catalog.format(
+        "updates.description", {{"manager", managerName}});
+    const auto lines = wrappedText(details, panel.width - inset * 2.0F);
+    text.push_back({fitText(catalog.text("updates.title"), panel.width - inset * 2.0F),
+                    panel.x + inset,
+                    panel.y + 48.0F * scale, palette.text});
+    const float lineHeight = std::max(16.0F, renderer.fontSize() * 1.3F);
+    const std::size_t maxLines = static_cast<std::size_t>(std::max(
+        1.0F, (layout.confirmUpdateButton.y - panel.y - 92.0F * scale) /
+                  lineHeight));
+    for (std::size_t index = 0; index < std::min(lines.size(), maxLines); ++index) {
+      text.push_back({lines[index], panel.x + inset,
+                      panel.y + 90.0F * scale +
+                          static_cast<float>(index) * lineHeight,
+                      palette.secondaryText});
+    }
+    drawButton(rectangles, text, images, layout.cancelUpdateButton,
+               catalog.text("button.cancel"), palette.elevated,
+               palette.outline, palette.text, "close.svg");
+    drawButton(rectangles, text, images, layout.confirmUpdateButton,
+               catalog.text("updates.action"), palette.primary,
+               palette.primary, palette.onPrimary);
+    applyVisualSettings(rectangles);
+    renderer.drawOverlay(width, height, rectangles, text, images);
   }
 
   void drawPackageInfo(int width, int height, const Layout& layout,
@@ -2844,44 +3813,50 @@ struct PackageView::Impl {
                     panel.height - 3.0F},
                    palette.surface, 22.0F);
 
-    text.push_back({"Package information", panel.x + 24.0F,
+    text.push_back({fitText(catalog.text("info.title"),
+                            panel.width - 24.0F - layout.infoDialogCloseButton.width - 32.0F),
+                    panel.x + 24.0F,
                     panel.y + 42.0F, palette.secondaryText});
     drawButton(rectangles, text, images, layout.infoDialogCloseButton, "",
-               palette.elevated, palette.outline, palette.text, "close.png");
-    const std::size_t titleLimit = static_cast<std::size_t>(
-        std::max(1.0F, (panel.width - 64.0F) / queryCharacterWidth()));
-    text.push_back({shortened(infoPackage.name, titleLimit), panel.x + 24.0F,
-                    panel.y + 82.0F, palette.text});
+               palette.elevated, palette.outline, palette.text, "close.svg");
+    const float contentInset = 24.0F;
     const float fontSize = static_cast<float>(renderer.fontSize());
-    const float maxVersionWidth = std::max(0.0F, panel.width - 40.0F);
-    const std::size_t versionLimit = static_cast<std::size_t>(std::max(
-        1.0F, (maxVersionWidth - 24.0F) / queryCharacterWidth()));
-    const std::string versionText = shortened(infoPackage.version, versionLimit);
+    const float maxVersionWidth =
+        std::max(0.0F, panel.width - contentInset * 2.0F);
+    const std::string versionText = fitText(infoPackage.version, maxVersionWidth - 24.0F);
     const float versionBadgeHeight = std::max(28.0F, fontSize + 10.0F);
     const float versionBadgeWidth = std::min(
         maxVersionWidth, renderer.measureText(versionText) + 24.0F);
-    const Bounds versionBadge{panel.x + 20.0F, panel.y + 91.0F,
+    const Bounds versionBadge{panel.x + contentInset, panel.y + 94.0F,
                               versionBadgeWidth, versionBadgeHeight};
     addRoundedRect(rectangles, versionBadge, palette.elevated, 12.0F);
     const float versionBaseline =
         versionBadge.y + (versionBadge.height - fontSize) * 0.5F + fontSize * 0.8F;
     text.push_back({versionText, versionBadge.x + 12.0F, versionBaseline,
                     palette.secondaryText});
-
-    const float lineHeight =
-        std::max(18.0F, fontSize * 1.45F);
-    const float descriptionHeaderBaseline =
-        versionBadge.y + versionBadge.height + 12.0F;
+    text.push_back({fitText(infoPackage.name, maxVersionWidth - 12.0F), panel.x + contentInset,
+                    panel.y + 80.0F, palette.text});
+    const std::string packageState = catalog.text(
+        infoPackage.installed ? "info.installed" : "info.available");
+    text.push_back({fitText(packageState, 144.0F),
+                    panel.x + contentInset, panel.y + 154.0F,
+                    infoPackage.installed ? palette.primary : palette.secondaryText});
+    const std::string managerName =
+        packageManager == pm::Manager::dnf ? "DNF" : "pacman";
+    const std::string managerLabel = catalog.format(
+        "info.manager", {{"manager", managerName}});
+    text.push_back({fitText(managerLabel, panel.width - 208.0F),
+                    panel.x + contentInset + 160.0F, panel.y + 154.0F,
+                    palette.secondaryText});
+    text.push_back({fitText(catalog.text("info.description"), panel.width - 48.0F),
+                    panel.x + contentInset,
+                    panel.y + 201.0F, palette.primary});
+    const float lineHeight = std::max(18.0F, fontSize * 1.45F);
     const float firstDescriptionBaseline =
-        descriptionHeaderBaseline + lineHeight;
-    const float lastDescriptionBaseline = panel.y + panel.height - 18.0F;
+        layout.infoDialogContent.y + lineHeight;
     const int maxLines = std::max(
         1, static_cast<int>(std::floor(
-               (lastDescriptionBaseline - firstDescriptionBaseline) /
-               lineHeight)) +
-               1);
-    text.push_back({"Description", panel.x + 24.0F,
-                    descriptionHeaderBaseline, palette.primary});
+               layout.infoDialogContent.height / lineHeight)));
     struct MarkdownLine {
       std::string text;
       bool heading;
@@ -2928,27 +3903,28 @@ struct PackageView::Impl {
       }
     }
     if (lines.empty()) {
-      lines.push_back({"No description provided.", false, false});
+      lines.push_back({catalog.text("info.noDescription"), false, false});
     }
-    const bool truncated = lines.size() > static_cast<std::size_t>(maxLines);
-    if (truncated) {
-      lines.resize(static_cast<std::size_t>(maxLines));
-    }
-    const std::size_t descriptionLimit = static_cast<std::size_t>(
-        std::max(1.0F, (panel.width - 48.0F) / queryCharacterWidth()));
-    if (truncated && !lines.empty()) {
-      const std::size_t prefixLimit =
-          descriptionLimit > 3 ? descriptionLimit - 3 : descriptionLimit;
-      lines.back().text = shortened(std::move(lines.back().text), prefixLimit) + "...";
-    }
-    for (std::size_t index = 0; index < lines.size(); ++index) {
+    const std::size_t maxScroll = lines.size() > static_cast<std::size_t>(maxLines)
+        ? lines.size() - static_cast<std::size_t>(maxLines) : 0;
+    const float scroll = std::clamp(infoScrollOffset, 0.0F,
+                                    static_cast<float>(maxScroll));
+    const std::size_t firstLine = static_cast<std::size_t>(scroll);
+    const float fractionalLine = scroll - static_cast<float>(firstLine);
+    for (std::size_t row = 0; row < static_cast<std::size_t>(maxLines) + 1; ++row) {
+      const std::size_t index = firstLine + row;
+      if (index >= lines.size()) break;
       const float baseline = firstDescriptionBaseline +
-                             static_cast<float>(index) * lineHeight;
+                             (static_cast<float>(row) - fractionalLine) * lineHeight;
+      if (baseline < layout.infoDialogContent.y + fontSize * 0.5F ||
+          baseline > layout.infoDialogContent.y + layout.infoDialogContent.height) {
+        continue;
+      }
       if (lines[index].heading) {
         const float headingWidth =
             std::min(textWidth, renderer.measureText(lines[index].text) + 16.0F);
         addRoundedRect(rectangles,
-                       {panel.x + 20.0F, baseline - lineHeight + 2.0F,
+                       {panel.x + contentInset, baseline - lineHeight + 2.0F,
                         headingWidth, lineHeight - 2.0F},
                        palette.primaryContainer, 8.0F, 0.65F);
       }
@@ -2958,6 +3934,20 @@ struct PackageView::Impl {
                       lines[index].heading || lines[index].bullet
                           ? palette.primary
                           : palette.text});
+    }
+    if (maxScroll > 0) {
+      const Bounds track{panel.x + panel.width - 8.0F,
+                         layout.infoDialogContent.y, 3.0F,
+                         layout.infoDialogContent.height};
+      const float thumbHeight = std::max(
+          22.0F, track.height * static_cast<float>(maxLines) /
+                     static_cast<float>(lines.size()));
+      const float fraction = scroll / static_cast<float>(maxScroll);
+      addRoundedRect(rectangles, track, palette.outline, 2.0F, 0.45F);
+      addRoundedRect(rectangles,
+                     {track.x, track.y + (track.height - thumbHeight) * fraction,
+                      track.width, thumbHeight},
+                     palette.primary, 2.0F);
     }
 
     for (render::RectItem& item : rectangles) {
@@ -2969,7 +3959,51 @@ struct PackageView::Impl {
     for (render::ImageItem& item : images) {
       item.opacity *= infoTransition;
     }
+    applyVisualSettings(rectangles);
     renderer.drawOverlay(width, height, rectangles, text, images);
+  }
+
+  void applyVisualSettings(std::vector<render::RectItem>& rectangles) const {
+    const float radiusScale = settings.cornerRadius * cornerScale / 16.0F;
+    for (std::size_t index = 0; index < rectangles.size(); ++index) {
+      render::RectItem& rectangle = rectangles[index];
+      const float rectangleMinDimension =
+          std::min(rectangle.width, rectangle.height);
+      rectangle.radius = std::clamp(
+          rectangle.radius * radiusScale, 0.0F, rectangleMinDimension * 0.5F);
+      if (index + 1 >= rectangles.size()) continue;
+      render::RectItem& inner = rectangles[index + 1];
+      const float insetX = inner.x - rectangle.x;
+      const float insetY = inner.y - rectangle.y;
+      const float oppositeInsetX =
+          rectangle.x + rectangle.width - inner.x - inner.width;
+      const float oppositeInsetY =
+          rectangle.y + rectangle.height - inner.y - inner.height;
+      const bool nestedBorder = insetX > 0.1F && insetY > 0.1F &&
+          std::abs(insetX - insetY) < 0.1F &&
+          std::abs(insetX - oppositeInsetX) < 0.1F &&
+          std::abs(insetY - oppositeInsetY) < 0.1F && insetX <= 4.0F &&
+          inner.width > 0.0F && inner.height > 0.0F;
+      if (nestedBorder) {
+        const float inset = std::min(
+            settings.borderSize * cornerScale,
+            std::min(rectangle.width, rectangle.height) * 0.25F);
+        const float outerRadius = std::clamp(
+            rectangle.radius, 0.0F,
+            std::min(rectangle.width, rectangle.height) * 0.5F);
+        inner.x = rectangle.x + inset;
+        inner.y = rectangle.y + inset;
+        inner.width = std::max(0.0F, rectangle.width - inset * 2.0F);
+        inner.height = std::max(0.0F, rectangle.height - inset * 2.0F);
+        const float innerMaxRadius =
+            std::min(inner.width, inner.height) * 0.5F;
+        rectangle.radius = outerRadius;
+        inner.radius = std::clamp(outerRadius - inset, 0.0F, innerMaxRadius);
+        // The inner fill already received its final radius above. Skipping it
+        // here prevents the settings multiplier from being applied twice.
+        ++index;
+      }
+    }
   }
 
   void drawSparkParticles(int width, int height) const {
@@ -2986,6 +4020,7 @@ struct PackageView::Impl {
                       size, size},
                      particle.color, size * 0.5F, 1.0F - progress);
     }
+    applyVisualSettings(rectangles);
     renderer.drawOverlay(width, height, rectangles, {}, {});
   }
 
@@ -2997,13 +4032,17 @@ struct PackageView::Impl {
     std::vector<render::RectItem> packageRectangles;
     std::vector<render::TextItem> packageText;
     std::vector<render::ImageItem> packageImages;
-    const float characterWidth = queryCharacterWidth();
 
     rectangles.push_back(
         {0.0F, 0.0F, static_cast<float>(width), static_cast<float>(height),
          palette.background});
     rectangles.push_back({0.0F, 0.0F, static_cast<float>(width), layout.headerHeight,
                           palette.header});
+    addRoundedRect(rectangles,
+                   {layout.searchCard.x, layout.searchCard.y + 3.0F,
+                    layout.searchCard.width, layout.searchCard.height},
+                   {0.0F, 0.0F, 0.0F}, 22.0F,
+                   themeIsLight() ? 0.07F : 0.20F);
     addRoundedRect(rectangles, layout.searchCard, palette.surface, 22.0F);
     addRoundedRect(rectangles,
                    {layout.searchField.x - 2.0F, layout.searchField.y - 2.0F,
@@ -3018,25 +4057,49 @@ struct PackageView::Impl {
                              logoSize, logoSize};
     addRoundedRect(rectangles, logoSurface, palette.elevated, logoSize * 0.5F);
     const float logoInset = logoSize * 0.08F;
-    images.push_back({iconPath("Flux.png"), logoSurface.x + logoInset,
+    images.push_back({iconPath("Flux.svg"), logoSurface.x + logoInset,
                       logoSurface.y + logoInset,
                       logoSize - logoInset * 2.0F,
                       logoSize - logoInset * 2.0F, 1.0F});
-    text.push_back({"Flux " FLUX_VERSION, layout.horizontalMargin + logoSize + 8.0F,
-                    layout.headerHeight * 0.67F, palette.text});
-    const std::size_t statusLimit = static_cast<std::size_t>(
-        std::max(1.0F, (static_cast<float>(width) - layout.horizontalMargin * 2.0F) /
-                           queryCharacterWidth()));
-    text.push_back({shortened(status, statusLimit), layout.horizontalMargin + 16.0F,
-                    layout.statusBaseline, palette.secondaryText});
-    text.push_back({"Packages", layout.resultsPanel.x + 20.0F,
-                    layout.packagesTitleBaseline, palette.secondaryText});
-
+    text.push_back({"Flux", layout.horizontalMargin + logoSize + 8.0F,
+                    renderer.baselineForCenter(layout.headerHeight * 0.5F),
+                    palette.text});
+    if (status != catalog.text("status.initial") &&
+        status != catalog.text("status.enterQuery")) {
+      text.push_back({fitText(status, static_cast<float>(width) -
+                                         layout.queryTextX -
+                                         layout.horizontalMargin),
+                      layout.queryTextX - 16.0F,
+                      layout.statusBaseline + 16.0F, palette.secondaryText});
+    }
+    const bool packagesActive = view == ViewMode::packages;
+    const bool installedActive = view == ViewMode::installed;
+    const bool updatesActive = view == ViewMode::updates;
+    drawButton(rectangles, text, images, layout.packagesButton, "",
+               packagesActive ? palette.primaryContainer : palette.elevated,
+               packagesActive ? palette.primary : palette.outline,
+               palette.text, "packages.svg", "navigation:packages");
+    if (packageManager != pm::Manager::none) {
+      drawButton(rectangles, text, images, layout.installedButton, "",
+                 installedActive ? palette.primaryContainer : palette.elevated,
+                 installedActive ? palette.primary : palette.outline,
+                 palette.text, "installed.svg", "navigation:installed");
+      drawButton(rectangles, text, images, layout.updatesButton, "",
+                 updatesActive ? palette.primaryContainer : palette.elevated,
+                 updatesActive ? palette.primary : palette.outline,
+                 palette.text, "update.svg", "navigation:updates");
+    }
     drawButton(rectangles, text, images, layout.settingsButton, "",
-               palette.elevated, palette.outline, palette.text, "settings.png");
-    drawButton(rectangles, text, images, layout.searchButton, "Search",
-               palette.primaryContainer, palette.primary, palette.text);
-    if (layout.showClearQueryButton && clearQueryButtonTransition > 0.005F) {
+               palette.elevated, palette.outline, palette.text, "settings.svg",
+               "navigation:settings");
+    if (view != ViewMode::installed) {
+      drawButton(rectangles, text, images, layout.searchButton,
+                 view == ViewMode::updates ? catalog.text("updates.action")
+                                           : catalog.text("search.button"),
+                 palette.primary, palette.primary, palette.onPrimary);
+    }
+    if (view == ViewMode::packages && layout.showClearQueryButton &&
+        clearQueryButtonTransition > 0.005F) {
       const float scale = 0.82F + clearQueryButtonTransition * 0.18F;
       const Bounds animatedClearButton{
           layout.clearQueryButton.x +
@@ -3047,7 +4110,7 @@ struct PackageView::Impl {
           layout.clearQueryButton.height * scale};
       drawButton(rectangles, text, images, animatedClearButton, "",
                  palette.elevated, palette.outline, palette.secondaryText,
-                 "close.png", {}, clearQueryButtonTransition);
+                 "close.svg", {}, clearQueryButtonTransition);
     }
 
     const float availableTextWidth = layout.queryTextWidth;
@@ -3056,7 +4119,7 @@ struct PackageView::Impl {
         query.empty()
             ? 0.0F
             : renderer.measureText(std::string_view(query).substr(0, viewStart));
-    if (hasSelection()) {
+    if (view == ViewMode::packages && hasSelection()) {
       const std::size_t selectedStart = std::max(viewStart, std::min(selectionAnchor, queryCursor));
       const std::size_t selectedEnd = std::min(viewEnd, std::max(selectionAnchor, queryCursor));
       if (selectedEnd > selectedStart) {
@@ -3076,7 +4139,7 @@ struct PackageView::Impl {
             palette.selection, 5.0F);
       }
     }
-    if (settings.animations) {
+    if (view == ViewMode::packages && settings.animations) {
       for (const DisappearingGlyph& glyph : disappearingGlyphs) {
         const float progress = glyphTransition(glyph.started);
         if (progress >= 1.0F) {
@@ -3094,7 +4157,15 @@ struct PackageView::Impl {
              palette.text, glyph.initialOpacity * (1.0F - progress)});
       }
     }
-    if (query.empty()) {
+    if (view == ViewMode::updates) {
+      text.push_back({fitText(catalog.text("updates.listTitle"), availableTextWidth),
+                      layout.queryTextX,
+                      layout.queryTextBaseline, palette.secondaryText});
+    } else if (view == ViewMode::installed) {
+      text.push_back({fitText(catalog.text("installed.listTitle"), availableTextWidth),
+                      layout.queryTextX,
+                      layout.queryTextBaseline, palette.secondaryText});
+    } else if (query.empty()) {
       float glyphX = layout.queryTextX;
       for (const AnimatedGlyph& glyph : queryGlyphs) {
         const float glyphWidth = renderer.measureText(glyph.text);
@@ -3167,9 +4238,12 @@ struct PackageView::Impl {
         scrollPosition - std::floor(scrollPosition);
     const std::size_t count = std::min(
         packages.size() - first,
-        static_cast<std::size_t>(layout.visibleRows + (fractionalScroll > 0.0F ? 1 : 0)));
+        static_cast<std::size_t>(layout.drawableRows + (fractionalScroll > 0.0F ? 1 : 0)));
     for (std::size_t row = 0; row < count; ++row) {
       const pm::Package& package = packages[first + row];
+      const std::size_t rectangleStart = packageRectangles.size();
+      const std::size_t textStart = packageText.size();
+      const std::size_t imageStart = packageImages.size();
       const float rowY = layout.firstRowY +
                          (static_cast<float>(row) - fractionalScroll) * layout.rowHeight;
       const float rowHeight = layout.rowHeight - 5.0F;
@@ -3178,11 +4252,12 @@ struct PackageView::Impl {
           std::max(0.0F, static_cast<float>(width) -
                              layout.horizontalMargin * 2.0F - 16.0F),
           rowHeight};
-      addRoundedRect(packageRectangles, rowBounds, palette.outline, 16.0F);
       addRoundedRect(packageRectangles,
-                     {rowBounds.x + 1.0F, rowBounds.y + 1.0F, rowBounds.width - 2.0F,
-                      rowBounds.height - 2.0F},
-                     palette.elevated, 15.0F);
+                     {rowBounds.x, rowBounds.y + 2.0F,
+                      rowBounds.width, rowBounds.height},
+                     {0.0F, 0.0F, 0.0F}, 16.0F,
+                     themeIsLight() ? 0.08F : 0.22F);
+      addRoundedRect(packageRectangles, rowBounds, palette.elevated, 16.0F);
       const bool actionInProgress =
           actionTask.valid() && !cacheClearTask &&
           package.name == activeActionPackage;
@@ -3215,14 +4290,20 @@ struct PackageView::Impl {
           layout.actionButtonWidth, layout.actionButtonHeight};
       const bool installed = package.installed;
       drawButton(packageRectangles, packageText, packageImages, helpButton, "",
-                 palette.elevated, palette.outline, palette.text, "help.png",
+                 palette.elevated, palette.outline, palette.text, "help.svg",
                  "package-help:" + package.name);
       drawButton(packageRectangles, packageText, packageImages, actionButton,
-                 installed ? "Remove" : "Install",
-                 installed ? std::array<float, 3>{0.38F, 0.20F, 0.23F}
-                           : palette.primaryContainer,
-                 installed ? std::array<float, 3>{0.64F, 0.33F, 0.38F}
-                           : palette.primary,
+                 view == ViewMode::updates
+                     ? catalog.text("updates.packageAction")
+                     : catalog.text(installed ? "package.remove" : "package.install"),
+                 view == ViewMode::updates
+                     ? palette.primaryContainer
+                     : installed ? std::array<float, 3>{0.38F, 0.20F, 0.23F}
+                                 : palette.primaryContainer,
+                 view == ViewMode::updates
+                     ? palette.primary
+                     : installed ? std::array<float, 3>{0.64F, 0.33F, 0.38F}
+                                 : palette.primary,
                  palette.text, {},
                  "package-action:" + package.name);
 
@@ -3230,27 +4311,74 @@ struct PackageView::Impl {
       const float textRight = layout.helpButtonX;
       const float packageTextWidth =
           std::max(0.0F, textRight - layout.rowContentX - 12.0F);
-      const std::size_t packageTextLength = static_cast<std::size_t>(
-          packageTextWidth / std::max(1.0F, characterWidth));
-      packageLabel = shortened(std::move(packageLabel), packageTextLength);
+      packageLabel = fitText(std::move(packageLabel), packageTextWidth);
       packageText.push_back({std::move(packageLabel), layout.rowContentX,
                              rowY + layout.rowHeight * 0.40F, palette.text});
       if (settings.showPackageDescriptions && !actionInProgress &&
           !package.description.empty() && width >= 600 &&
           rowHeight >= 54.0F) {
-        const std::size_t descriptionLength = static_cast<std::size_t>(
-            packageTextWidth / std::max(1.0F, characterWidth));
         packageText.push_back(
-            {shortened(package.description, descriptionLength),
+            {fitText(package.description, packageTextWidth),
              layout.rowContentX, rowY + layout.rowHeight * 0.78F,
              palette.secondaryText});
+      }
+
+      if (settings.animations && !packageListExiting) {
+        const auto now = std::chrono::steady_clock::now();
+        const float appearanceDuration =
+            std::clamp(frameDeltaSeconds * 6.0F, 0.075F, 0.13F);
+        const float appearanceStagger =
+            std::clamp(frameDeltaSeconds * 0.5F, 0.004F, 0.012F);
+        const auto [appearance, inserted] = packageAppearanceStarts.try_emplace(
+            package.name,
+            PackageAppearance{
+                now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                          std::chrono::duration<float>(
+                              static_cast<float>(row) * appearanceStagger)),
+                appearanceDuration});
+        static_cast<void>(inserted);
+        const float elapsed =
+            std::chrono::duration<float>(now - appearance->second.started).count();
+        const float progress =
+            std::clamp(elapsed / appearance->second.duration, 0.0F, 1.0F);
+        const float eased = 1.0F - std::pow(1.0F - progress, 3.0F);
+        const float offset = 12.0F * (1.0F - eased);
+        for (std::size_t index = rectangleStart;
+             index < packageRectangles.size(); ++index) {
+          packageRectangles[index].y += offset;
+          packageRectangles[index].opacity *= eased;
+        }
+        for (std::size_t index = textStart; index < packageText.size(); ++index) {
+          packageText[index].baseline += offset;
+          packageText[index].opacity *= eased;
+        }
+        for (std::size_t index = imageStart; index < packageImages.size(); ++index) {
+          packageImages[index].y += offset;
+          packageImages[index].opacity *= eased;
+        }
+      }
+      if (packageListExiting) {
+        const float offset = -8.0F * (1.0F - packageListTransition);
+        for (std::size_t index = rectangleStart;
+             index < packageRectangles.size(); ++index) {
+          packageRectangles[index].y += offset;
+          packageRectangles[index].opacity *= packageListTransition;
+        }
+        for (std::size_t index = textStart; index < packageText.size(); ++index) {
+          packageText[index].baseline += offset;
+          packageText[index].opacity *= packageListTransition;
+        }
+        for (std::size_t index = imageStart; index < packageImages.size(); ++index) {
+          packageImages[index].y += offset;
+          packageImages[index].opacity *= packageListTransition;
+        }
       }
     }
 
     if (packages.empty() && !busy() &&
-        (status == "Type a package name and press Enter to search." ||
-         status == "No matching packages found.")) {
-      const bool noMatches = status == "No matching packages found.";
+        (status == catalog.text("status.initial") ||
+         status == catalog.text("status.noResults"))) {
+      const bool noMatches = status == catalog.text("status.noResults");
       const float centerX = static_cast<float>(width) * 0.5F;
       const float centerY =
           layout.firstRowY +
@@ -3258,18 +4386,17 @@ struct PackageView::Impl {
               0.5F;
       const Bounds iconSurface{centerX - 34.0F, centerY - 82.0F, 68.0F, 68.0F};
       addRoundedRect(packageRectangles, iconSurface, palette.elevated, 34.0F);
+      const float emptyIconSize = std::min(54.0F, 32.0F * settings.iconScale);
       packageImages.push_back(
-          {iconPath("search.png"), centerX - 16.0F, centerY - 64.0F,
-           32.0F, 32.0F, 0.82F});
-      const std::size_t detailLimit = static_cast<std::size_t>(std::max(
-          1.0F, (layout.resultsPanel.width - 48.0F) /
-                    std::max(1.0F, characterWidth)));
-      const std::string heading = shortened(
-          noMatches ? "No packages found" : "Find your next app", detailLimit);
-      const std::string detail = shortened(
-          noMatches ? "Try another name or a shorter search."
-                    : "Search package names to browse available software.",
-          detailLimit);
+          {iconPath("search.svg"), centerX - emptyIconSize * 0.5F,
+           centerY - 82.0F + (68.0F - emptyIconSize) * 0.5F,
+           emptyIconSize, emptyIconSize, 0.82F, false, palette.primary, true});
+      const std::string heading = fitText(
+          catalog.text(noMatches ? "home.noPackages" : "home.emptyTitle"),
+          layout.resultsPanel.width - 48.0F);
+      const std::string detail = fitText(
+          catalog.text(noMatches ? "home.tryAnother" : "home.emptyPrompt"),
+          layout.resultsPanel.width - 48.0F);
       const float headingBaseline =
           centerY + static_cast<float>(renderer.fontSize()) * 0.75F;
       const float detailBaseline =
@@ -3282,29 +4409,46 @@ struct PackageView::Impl {
            detailBaseline, palette.secondaryText});
     }
 
-    const Bounds scrollbar = scrollbarThumb(layout);
+    Bounds scrollbar = scrollbarThumb(layout);
     if (scrollbar.height > 0.0F) {
-      addRoundedRect(packageRectangles, layout.packageScrollbarTrack,
-                     palette.outline, 3.0F,
-                     0.30F);
-      addRoundedRect(packageRectangles, scrollbar, palette.primary, 3.0F, 0.90F);
+      const bool hovered =
+          draggingPackageScrollbar ||
+          contains(scrollbarHoverBounds(layout), cursorX, cursorY);
+      const float target = hovered ? 1.0F : 0.0F;
+      const float blend = settings.animations
+                              ? 1.0F - std::exp(-frameDeltaSeconds * 22.0F)
+                              : 1.0F;
+      packageScrollbarHover += (target - packageScrollbarHover) * blend;
+
+      const float extraWidth = 4.0F * packageScrollbarHover;
+      Bounds track = layout.packageScrollbarTrack;
+      track.x -= extraWidth;
+      track.width += extraWidth;
+      scrollbar.x -= extraWidth;
+      scrollbar.width += extraWidth;
+      const float radius = track.width * 0.5F;
+      addRoundedRect(packageRectangles, track, palette.outline, radius, 0.30F);
+      addRoundedRect(packageRectangles, scrollbar, palette.primary, radius, 0.90F);
+    } else {
+      packageScrollbarHover = 0.0F;
     }
 
     if (packages.size() > count) {
-      const std::string range =
-          "Showing " + std::to_string(first + 1) + "-" +
-          std::to_string(first + count) + " of " + std::to_string(packages.size()) +
-          " packages - use mouse wheel to scroll";
+      const std::string range = catalog.format(
+          "home.range",
+          {{"first", std::to_string(first + 1)},
+           {"last", std::to_string(first + count)},
+           {"total", std::to_string(packages.size())}});
       const float rangeBaseline =
           static_cast<float>(height) - layout.horizontalMargin * 0.5F;
-      const std::size_t rangeLength = static_cast<std::size_t>(
-          std::max(1.0F, (static_cast<float>(width) -
-                          layout.horizontalMargin * 2.0F) /
-                             characterWidth));
-      text.push_back({shortened(range, rangeLength), layout.horizontalMargin + 16.0F,
+      text.push_back({fitText(range, static_cast<float>(width) -
+                                         layout.horizontalMargin * 2.0F - 16.0F),
+                      layout.horizontalMargin + 16.0F,
                       rangeBaseline, palette.secondaryText});
     }
 
+    applyVisualSettings(rectangles);
+    applyVisualSettings(packageRectangles);
     renderer.draw(width, height, rectangles, text, images);
     renderer.drawClipped(
         width, height,
@@ -3315,6 +4459,9 @@ struct PackageView::Impl {
     if (packageInfoOpen || infoTransition > 0.005F) {
       drawPackageInfo(width, height, layout, palette);
     }
+    if (updatesOpen) {
+      drawUpdateDialog(width, height, layout, palette);
+    }
   }
 
   void draw(int width, int height) const {
@@ -3323,9 +4470,10 @@ struct PackageView::Impl {
       return;
     }
 
-    const Layout layout =
-        makeLayout(width, height, renderer.fontSize(), settings.compactList);
-    const Palette& palette = themeIsLight() ? kLightPalette : kDarkPalette;
+    const Layout layout = makeLayout(width, height, renderer,
+                                     settings.compactList);
+    cornerScale = std::clamp(static_cast<float>(height) / 560.0F, 0.35F, 1.0F);
+    const Palette& palette = currentPalette();
     if (settingsOpen || settingsTransition > 0.005F) {
       drawMainScene(width, height, layout, palette);
       renderer.blurCurrentFramebuffer(width, height, settingsTransition);
@@ -3353,6 +4501,8 @@ struct PackageView::Impl {
       for (render::ImageItem& item : images) {
         item.opacity *= settingsTransition;
       }
+      applyVisualSettings(rectangles);
+      applyVisualSettings(dropdownRectangles);
       renderer.drawOverlay(width, height, rectangles, text, images);
       for (render::RectItem& item : dropdownRectangles) {
         item.opacity *= settingsTransition;
@@ -3365,6 +4515,9 @@ struct PackageView::Impl {
       }
       renderer.drawOverlay(width, height, dropdownRectangles, dropdownText,
                            dropdownImages);
+      if (cacheConfirmOpen) {
+        drawCacheConfirmation(width, height, layout, palette);
+      }
       drawSparkParticles(width, height);
       return;
     }

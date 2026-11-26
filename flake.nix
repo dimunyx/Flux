@@ -56,6 +56,7 @@
               freetype
               fontconfig
               libpng
+              librsvg
               libepoxy
               libGL
             ];

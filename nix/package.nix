@@ -8,6 +8,7 @@
   freetype,
   fontconfig,
   libpng,
+  librsvg,
   libepoxy,
   libGL,
   lld,
@@ -38,6 +39,7 @@ stdenv.mkDerivation {
     freetype
     fontconfig
     libpng
+    librsvg
     libepoxy
     libGL
   ];
