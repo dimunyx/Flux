@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FLUX_VERSION LIMIT_COUNT 1)
 string(STRIP "${FLUX_VERSION}" FLUX_VERSION)
 if(NOT FLUX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
-    message(FATAL_ERROR "VERSION must contain a semantic version such as 0.1.0")
+    message(FATAL_ERROR "VERSION must contain a semantic version such as 0.1.1")
 endif()
 
 project(Flux
@@ -119,6 +119,11 @@ endif()
 
 install(TARGETS flux RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY src/assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/flux/assets)
+install(FILES src/assets/flux.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES src/assets/Flux.png
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/512x512/apps
+    RENAME flux.png)
 
 set(CPACK_PACKAGE_NAME "flux")
 set(CPACK_PACKAGE_VENDOR "Flux contributors")

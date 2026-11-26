@@ -21,20 +21,20 @@ int main(int argc, char* argv[]) {
   try {
     // --force starts the interface without package management, regardless of
     // the distribution. Without it, an unsupported distribution is an error.
-    bool pacmanSupported = false;
+    pm::Manager packageManager = pm::Manager::none;
     if (!force) {
-      std::string distro;
-      if (getOS(distro) != 0 || getPM(distro) != 0) {
+      OSInfo os;
+      if (getOS(os) != 0 ||
+          (packageManager = pm::getPM(os.id, os.idLike)) == pm::Manager::none) {
         std::cerr << "Flux: unsupported distribution. "
                      "Start with --force to run without package management.\n";
         return 1;
       }
-      pacmanSupported = distro == "arch";
     }
 
     core::Window window(1280, 720, "Flux " FLUX_VERSION);
     render::Renderer renderer;
-    ui::PackageView packageView(window, renderer, pacmanSupported);
+    ui::PackageView packageView(window, renderer, packageManager);
 
     while (!window.shouldClose()) {
       window.pollEvents();

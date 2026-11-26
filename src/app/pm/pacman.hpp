@@ -1,18 +1,8 @@
 #pragma once
 
-#include <functional>
-#include <string>
-#include <string_view>
-#include <vector>
+#include "pm/pm.hpp"
 
 namespace pm {
-
-struct Package {
-  std::string name;
-  std::string version;
-  std::string description;
-  bool installed = false;
-};
 
 std::vector<Package> searchPacman(
     std::string_view query,

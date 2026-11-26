@@ -2,7 +2,7 @@
 pkgname=flux
 # The root VERSION file is the single source of truth for the version.
 pkgver=$(<"$startdir/../../VERSION")
-pkgrel=2
+pkgrel=1
 pkgdesc="A lightweight Linux software center"
 arch=('x86_64' 'aarch64')
 url="https://github.com/dimunyx/Flux"
@@ -29,12 +29,4 @@ build() {
 
 package() {
   DESTDIR="$pkgdir" cmake --install "$srcdir/build"
-
-  # Desktop entry
-  install -Dm644 "$startdir/../../src/assets/flux.desktop" \
-    "$pkgdir/usr/share/applications/flux.desktop"
-
-  # Application icon
-  install -Dm644 "$startdir/../../src/assets/Flux.png" \
-    "$pkgdir/usr/share/icons/hicolor/512x512/apps/flux.png"
 }

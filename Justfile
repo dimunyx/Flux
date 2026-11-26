@@ -56,7 +56,7 @@ rebuild type=build_type: clean (build type)
 
 # Remove the Unix Makefiles build artefacts.
 clean:
-    rm -rf build/Makefiles
+    rm -rf build
 
 # Format src/ with clang-format.
 fmt:

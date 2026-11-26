@@ -19,6 +19,8 @@ Window::Window(int width, int height, const char* title) {
     throw std::runtime_error("Failed to create an OpenGL 4.6 window");
   }
 
+  glfwSetWindowSizeLimits(window_, 640, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
+
   glfwMakeContextCurrent(window_);
   glfwSwapInterval(1);
 }

@@ -1,7 +1,7 @@
 #include "ui/package_view.hpp"
 
 #include "core/window.hpp"
-#include "pm/pacman.hpp"
+#include "pm/pm.hpp"
 #include "render/renderer.hpp"
 
 #include <GLFW/glfw3.h>
@@ -51,6 +51,7 @@ struct UserSettings {
   bool animations = true;
   bool smoothScroll = true;
   bool clickSparks = true;
+  bool showPackageDescriptions = true;
 };
 
 struct Bounds {
@@ -184,12 +185,14 @@ struct Layout {
   Bounds increaseFontButton;
   Bounds themeButton;
   Bounds densityButton;
+  Bounds descriptionsButton;
   Bounds animationButton;
   Bounds smoothScrollButton;
   Bounds sparkButton;
   Bounds fontFamilyButton;
   Bounds fontStyleButton;
   Bounds clearCacheButton;
+  Bounds resetSettingsButton;
   Bounds closeSettingsButton;
   Bounds settingsHeaderCloseButton;
   Bounds cacheConfirmPanel;
@@ -399,6 +402,8 @@ UserSettings loadSettings() {
       settings.smoothScroll = value != "false";
     } else if (key == "click_sparks") {
       settings.clickSparks = value != "false";
+    } else if (key == "show_package_descriptions") {
+      settings.showPackageDescriptions = value != "false";
     }
   }
   return settings;
@@ -427,7 +432,9 @@ void saveSettings(const UserSettings& settings) {
          << "animations=" << (settings.animations ? "true" : "false") << '\n'
          << "smooth_scroll=" << (settings.smoothScroll ? "true" : "false")
          << '\n'
-         << "click_sparks=" << (settings.clickSparks ? "true" : "false") << '\n';
+         << "click_sparks=" << (settings.clickSparks ? "true" : "false") << '\n'
+         << "show_package_descriptions="
+         << (settings.showPackageDescriptions ? "true" : "false") << '\n';
   if (!output) {
     throw std::runtime_error("Could not save the settings");
   }
@@ -436,6 +443,7 @@ void saveSettings(const UserSettings& settings) {
 Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float windowWidth = std::max(0.0F, static_cast<float>(width));
   const float windowHeight = std::max(0.0F, static_cast<float>(height));
+  const float textSize = static_cast<float>(fontSize);
   const float margin = std::clamp(windowWidth * 0.025F, 12.0F, 32.0F);
   const float headerHeight = std::clamp(windowHeight * 0.09F, 48.0F, 64.0F);
   const float searchCardHeight = std::clamp(windowHeight * 0.11F, 68.0F, 82.0F);
@@ -459,7 +467,8 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float confirmButtonHeight = std::min(38.0F, confirmScale * 38.0F);
 
   const float searchButtonWidth =
-      std::clamp((searchCard.width - 32.0F) * 0.30F, 56.0F, 118.0F);
+      std::clamp((searchCard.width - 32.0F) * 0.30F,
+                 std::max(92.0F, textSize * 3.5F), 136.0F);
   const float searchButtonHeight =
       std::min(48.0F, std::max(36.0F, searchCardHeight - 20.0F));
   const float searchButtonX =
@@ -477,13 +486,12 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
   const float bottomMargin = std::max(12.0F, margin);
   const float remainingRowHeight =
       std::max(48.0F, (windowHeight - firstRowY - bottomMargin) / 2.5F);
-  const float textSize = static_cast<float>(fontSize);
   const float requestedRowHeight =
       compactList ? std::max(54.0F, textSize * 2.2F)
                   : std::max(72.0F, textSize * 2.8F);
   const float rowHeight = std::min(requestedRowHeight, remainingRowHeight);
-  const float actionButtonWidth =
-      std::clamp(windowWidth * 0.08F, 48.0F, 64.0F);
+  const float actionButtonWidth = std::clamp(
+      windowWidth * 0.10F, std::max(96.0F, textSize * 3.75F), 120.0F);
   const float actionButtonHeight = std::min(40.0F, rowHeight - 8.0F);
   const float actionButtonX = windowWidth - margin - 20.0F - actionButtonWidth;
   const float helpButtonWidth = std::min(36.0F, actionButtonHeight);
@@ -574,6 +582,10 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
       .densityButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
                         panelY + 110.0F * settingsScale,
                         settingsControlWidth, 38.0F * settingsScale},
+      .descriptionsButton = {
+          panelX + settingsWidth - settingsControlWidth - 20.0F,
+          panelY + 334.0F * settingsScale, settingsControlWidth,
+          38.0F * settingsScale},
       .animationButton = {panelX + settingsWidth - settingsControlWidth - 20.0F,
                           panelY + 278.0F * settingsScale,
                           settingsControlWidth, 38.0F * settingsScale},
@@ -594,6 +606,10 @@ Layout makeLayout(int width, int height, int fontSize, bool compactList) {
                            panelY + 156.0F * settingsScale,
                            settingsWidth - 40.0F,
                            40.0F * settingsScale},
+      .resetSettingsButton = {panelX + 20.0F,
+                              panelY + 210.0F * settingsScale,
+                              settingsWidth - 40.0F,
+                              40.0F * settingsScale},
       .closeSettingsButton = {panelX + settingsWidth - closeWidth - 20.0F,
                               panelY + settingsHeight - 52.0F * settingsScale,
                               closeWidth, closeHeight},
@@ -725,7 +741,7 @@ struct PackageView::Impl {
 
   GLFWwindow* window;
   render::Renderer& renderer;
-  bool pacmanSupported;
+  pm::Manager packageManager;
   bool searchFocused = true;
   bool settingsOpen = false;
   bool cacheConfirmOpen = false;
@@ -786,10 +802,11 @@ struct PackageView::Impl {
   std::future<std::vector<pm::Package>> searchTask;
   std::future<void> actionTask;
 
-  Impl(core::Window& owner, render::Renderer& rendererRef, bool supportsPacman)
+  Impl(core::Window& owner, render::Renderer& rendererRef,
+       pm::Manager selectedManager)
       : window(owner.nativeHandle()),
         renderer(rendererRef),
-        pacmanSupported(supportsPacman) {
+        packageManager(selectedManager) {
     settings = loadSettings();
     renderer.setFontSize(settings.fontSize);
     previousFontSize = settings.fontSize;
@@ -830,8 +847,8 @@ struct PackageView::Impl {
         fontFamilies.push_back(font.family);
       }
     }
-    if (!pacmanSupported) {
-      status = "Package operations are currently supported on Arch Linux only.";
+    if (packageManager == pm::Manager::none) {
+      status = "Package operations are not supported on this distribution.";
     }
     syncQueryGlyphs();
     glfwSetWindowUserPointer(window, this);
@@ -882,11 +899,13 @@ struct PackageView::Impl {
                   contains(layout.themeButton, cursorX, cursorY);
       } else if (settingsCategory == SettingsCategory::behavior) {
         pointer = pointer || contains(layout.densityButton, cursorX, cursorY) ||
+                  contains(layout.descriptionsButton, cursorX, cursorY) ||
                   contains(layout.smoothScrollButton, cursorX, cursorY) ||
                   contains(layout.sparkButton, cursorX, cursorY) ||
                   contains(layout.animationButton, cursorX, cursorY);
       } else {
-        pointer = pointer || contains(layout.clearCacheButton, cursorX, cursorY);
+        pointer = pointer || contains(layout.clearCacheButton, cursorX, cursorY) ||
+                  contains(layout.resetSettingsButton, cursorX, cursorY);
       }
       if (dropdownOpen) {
         const DropdownGeometry geometry = dropdownGeometry(layout);
@@ -1475,8 +1494,8 @@ struct PackageView::Impl {
     if (busy()) {
       return;
     }
-    if (!pacmanSupported) {
-      status = "Package operations are currently supported on Arch Linux only.";
+    if (packageManager == pm::Manager::none) {
+      status = "Package operations are not supported on this distribution.";
       return;
     }
     if (query.empty()) {
@@ -1490,17 +1509,19 @@ struct PackageView::Impl {
     packages.clear();
     scrollOffset = 0;
     scrollPosition = 0.0F;
-    status = "Searching pacman repositories...";
+    const std::string managerName =
+        packageManager == pm::Manager::dnf ? "DNF" : "pacman";
+    status = "Searching " + managerName + " repositories...";
     searchProgress.store(0.0F, std::memory_order_relaxed);
     searchTask = std::async(std::launch::async, [searchTerm, this] {
-      return pm::searchPacman(searchTerm, [this](float progress) {
+      return pm::searchPackages(packageManager, searchTerm, [this](float progress) {
         searchProgress.store(progress, std::memory_order_relaxed);
       });
     });
   }
 
   void startAction(const pm::Package& package) {
-    if (busy() || !pacmanSupported) {
+    if (busy() || packageManager == pm::Manager::none) {
       return;
     }
 
@@ -1510,23 +1531,28 @@ struct PackageView::Impl {
     activeActionPackage = packageName;
     status = std::string(installed ? "Removing " : "Installing ") + packageName +
              " (Polkit may ask for authentication)...";
-    actionTask = std::async(std::launch::async, [packageName, installed] {
+    const pm::Manager manager = packageManager;
+    actionTask = std::async(std::launch::async, [packageName, installed, manager] {
       if (installed) {
-        pm::removePacman(packageName);
+        pm::removePackage(manager, packageName);
       } else {
-        pm::installPacman(packageName);
+        pm::installPackage(manager, packageName);
       }
     });
   }
 
   void startCacheClear() {
-    if (busy() || !pacmanSupported) {
+    if (busy() || packageManager == pm::Manager::none) {
       return;
     }
     cacheClearTask = true;
     activeActionPackage.clear();
-    status = "Clearing the entire pacman package cache via Polkit...";
-    actionTask = std::async(std::launch::async, [] { pm::clearPacmanCache(); });
+    const pm::Manager manager = packageManager;
+    const std::string managerName =
+        manager == pm::Manager::dnf ? "DNF" : "pacman";
+    status = "Clearing the entire " + managerName + " package cache via Polkit...";
+    actionTask = std::async(std::launch::async,
+                            [manager] { pm::clearPackageCache(manager); });
   }
 
   void updateSearch() {
@@ -1558,7 +1584,9 @@ struct PackageView::Impl {
     try {
       actionTask.get();
       if (wasCacheClear) {
-        status = "Pacman package cache cleared.";
+        const std::string managerName =
+            packageManager == pm::Manager::dnf ? "DNF" : "Pacman";
+        status = managerName + " package cache cleared.";
         return;
       }
       status = "Transaction finished; refreshing results...";
@@ -1795,6 +1823,23 @@ struct PackageView::Impl {
     }
   }
 
+  void resetSettings() {
+    const int oldFontSize = renderer.fontSize();
+    try {
+      renderer.useSystemFont();
+      renderer.setFontSize(kDefaultFontSize);
+      settings = UserSettings{};
+      previousFontSize = oldFontSize;
+      fontSizeTransition = settings.animations ? 0.0F : 1.0F;
+      systemLightTheme = systemPreferredLightTheme().value_or(false);
+      nextSystemThemeCheck =
+          std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      persistSettings();
+    } catch (const std::exception& error) {
+      settingsStatus = std::string("Could not reset settings: ") + error.what();
+    }
+  }
+
   void persistSettings() {
     try {
       saveSettings(settings);
@@ -1953,11 +1998,20 @@ struct PackageView::Impl {
           triggerButtonPress(layout.animationButton);
           settings.animations = !settings.animations;
           persistSettings();
+        } else if (contains(layout.descriptionsButton, cursorX, cursorY)) {
+          triggerButtonPress(layout.descriptionsButton);
+          settings.showPackageDescriptions = !settings.showPackageDescriptions;
+          persistSettings();
         }
-      } else if (contains(layout.clearCacheButton, cursorX, cursorY)) {
-        triggerButtonPress(layout.clearCacheButton);
-        dropdownOpen = false;
-        cacheConfirmOpen = true;
+      } else {
+        if (contains(layout.clearCacheButton, cursorX, cursorY)) {
+          triggerButtonPress(layout.clearCacheButton);
+          dropdownOpen = false;
+          cacheConfirmOpen = true;
+        } else if (contains(layout.resetSettingsButton, cursorX, cursorY)) {
+          triggerButtonPress(layout.resetSettingsButton);
+          resetSettings();
+        }
       }
       if (contains(layout.closeSettingsButton, cursorX, cursorY)) {
         triggerButtonPress(layout.closeSettingsButton);
@@ -2642,6 +2696,9 @@ struct PackageView::Impl {
                         panel.y + 252.0F * scale, palette.secondaryText});
         text.push_back({"Animations", panel.x + 30.0F,
                         panel.y + 308.0F * scale, palette.secondaryText});
+        text.push_back({narrowPanel ? "Descriptions" : "Package descriptions",
+                        panel.x + 30.0F,
+                        panel.y + 364.0F * scale, palette.secondaryText});
       } else {
         text.push_back({shortened("System theme follows the desktop preference.",
                                   static_cast<std::size_t>(
@@ -2651,6 +2708,12 @@ struct PackageView::Impl {
                         palette.secondaryText});
         text.push_back({"Package cache", panel.x + 24.0F,
                         panel.y + 142.0F * scale, palette.secondaryText});
+        text.push_back({shortened("Reset appearance and behavior settings.",
+                                  static_cast<std::size_t>(
+                                      std::max(1.0F, (panel.width - 48.0F) /
+                                                        queryCharacterWidth()))),
+                        panel.x + 24.0F, panel.y + 272.0F * scale,
+                        palette.secondaryText});
       }
 
       if (!settingsStatus.empty()) {
@@ -2705,10 +2768,16 @@ struct PackageView::Impl {
                    settings.clickSparks, scale, palette);
         drawSwitch(rectangles, layout.animationButton, "animations",
                    settings.animations, scale, palette);
+        drawSwitch(rectangles, layout.descriptionsButton,
+                   "package-descriptions", settings.showPackageDescriptions,
+                   scale, palette);
       } else {
         drawButton(rectangles, text, images, layout.clearCacheButton, "Clear",
                    {0.38F, 0.20F, 0.23F}, {0.64F, 0.33F, 0.38F},
                    {1.0F, 0.88F, 0.89F}, "delete.png");
+        drawButton(rectangles, text, images, layout.resetSettingsButton,
+                   "Reset settings", palette.elevated, palette.outline,
+                   palette.text);
       }
       drawButton(rectangles, text, images, layout.closeSettingsButton, "Done",
                  palette.primaryContainer, palette.primary, palette.text,
@@ -2734,11 +2803,17 @@ struct PackageView::Impl {
                                 confirmationTextLength),
                       confirmation.x + 24.0F,
                       confirmation.y + 48.0F * confirmationScale, palette.text});
-      text.push_back({shortened("Includes AUR downloads; cannot be undone.",
-                                confirmationTextLength),
+      const std::string cacheEffect =
+          packageManager == pm::Manager::dnf
+              ? "Removes cached packages and repository metadata."
+              : "Removes downloaded pacman packages.";
+      text.push_back({shortened(cacheEffect, confirmationTextLength),
                       confirmation.x + 24.0F, confirmation.y + 94.0F * confirmationScale,
                       palette.secondaryText});
-      text.push_back({shortened("Location: /var/cache/pacman/pkg",
+      const std::string cacheLocation =
+          packageManager == pm::Manager::dnf ? "Location: /var/cache/dnf"
+                                             : "Location: /var/cache/pacman/pkg";
+      text.push_back({shortened(cacheLocation,
                                 confirmationTextLength),
                       confirmation.x + 24.0F, confirmation.y + 124.0F * confirmationScale,
                       palette.secondaryText});
@@ -2777,18 +2852,36 @@ struct PackageView::Impl {
         std::max(1.0F, (panel.width - 64.0F) / queryCharacterWidth()));
     text.push_back({shortened(infoPackage.name, titleLimit), panel.x + 24.0F,
                     panel.y + 82.0F, palette.text});
+    const float fontSize = static_cast<float>(renderer.fontSize());
+    const float maxVersionWidth = std::max(0.0F, panel.width - 40.0F);
+    const std::size_t versionLimit = static_cast<std::size_t>(std::max(
+        1.0F, (maxVersionWidth - 24.0F) / queryCharacterWidth()));
+    const std::string versionText = shortened(infoPackage.version, versionLimit);
+    const float versionBadgeHeight = std::max(28.0F, fontSize + 10.0F);
+    const float versionBadgeWidth = std::min(
+        maxVersionWidth, renderer.measureText(versionText) + 24.0F);
     const Bounds versionBadge{panel.x + 20.0F, panel.y + 91.0F,
-                              std::min(panel.width - 40.0F, 190.0F), 28.0F};
+                              versionBadgeWidth, versionBadgeHeight};
     addRoundedRect(rectangles, versionBadge, palette.elevated, 12.0F);
-    text.push_back({infoPackage.version, panel.x + 30.0F,
-                    panel.y + 111.0F, palette.secondaryText});
-    text.push_back({"Description", panel.x + 24.0F,
-                    panel.y + 145.0F, palette.primary});
+    const float versionBaseline =
+        versionBadge.y + (versionBadge.height - fontSize) * 0.5F + fontSize * 0.8F;
+    text.push_back({versionText, versionBadge.x + 12.0F, versionBaseline,
+                    palette.secondaryText});
 
     const float lineHeight =
-        std::max(18.0F, static_cast<float>(renderer.fontSize()) * 1.45F);
+        std::max(18.0F, fontSize * 1.45F);
+    const float descriptionHeaderBaseline =
+        versionBadge.y + versionBadge.height + 12.0F;
+    const float firstDescriptionBaseline =
+        descriptionHeaderBaseline + lineHeight;
+    const float lastDescriptionBaseline = panel.y + panel.height - 18.0F;
     const int maxLines = std::max(
-        1, static_cast<int>((panel.height - 166.0F) / lineHeight));
+        1, static_cast<int>(std::floor(
+               (lastDescriptionBaseline - firstDescriptionBaseline) /
+               lineHeight)) +
+               1);
+    text.push_back({"Description", panel.x + 24.0F,
+                    descriptionHeaderBaseline, palette.primary});
     struct MarkdownLine {
       std::string text;
       bool heading;
@@ -2849,8 +2942,8 @@ struct PackageView::Impl {
       lines.back().text = shortened(std::move(lines.back().text), prefixLimit) + "...";
     }
     for (std::size_t index = 0; index < lines.size(); ++index) {
-      const float baseline =
-          panel.y + 170.0F + static_cast<float>(index) * lineHeight;
+      const float baseline = firstDescriptionBaseline +
+                             static_cast<float>(index) * lineHeight;
       if (lines[index].heading) {
         const float headingWidth =
             std::min(textWidth, renderer.measureText(lines[index].text) + 16.0F);
@@ -2919,10 +3012,16 @@ struct PackageView::Impl {
     addRoundedRect(rectangles, layout.searchField, palette.elevated, 16.0F);
     addRoundedRect(rectangles, layout.resultsPanel, palette.surface, 24.0F);
 
-    const float logoSize = std::min(32.0F, layout.headerHeight * 0.68F);
-    images.push_back({iconPath("Flux.png"), layout.horizontalMargin,
-                      (layout.headerHeight - logoSize) * 0.5F,
-                      logoSize, logoSize, 1.0F, true});
+    const float logoSize = std::min(40.0F, layout.headerHeight * 0.72F);
+    const Bounds logoSurface{layout.horizontalMargin,
+                             (layout.headerHeight - logoSize) * 0.5F,
+                             logoSize, logoSize};
+    addRoundedRect(rectangles, logoSurface, palette.elevated, logoSize * 0.5F);
+    const float logoInset = logoSize * 0.08F;
+    images.push_back({iconPath("Flux.png"), logoSurface.x + logoInset,
+                      logoSurface.y + logoInset,
+                      logoSize - logoInset * 2.0F,
+                      logoSize - logoInset * 2.0F, 1.0F});
     text.push_back({"Flux " FLUX_VERSION, layout.horizontalMargin + logoSize + 8.0F,
                     layout.headerHeight * 0.67F, palette.text});
     const std::size_t statusLimit = static_cast<std::size_t>(
@@ -2935,9 +3034,8 @@ struct PackageView::Impl {
 
     drawButton(rectangles, text, images, layout.settingsButton, "",
                palette.elevated, palette.outline, palette.text, "settings.png");
-    drawButton(rectangles, text, images, layout.searchButton, "",
-               palette.primaryContainer, palette.primary, palette.text,
-               "search.png");
+    drawButton(rectangles, text, images, layout.searchButton, "Search",
+               palette.primaryContainer, palette.primary, palette.text);
     if (layout.showClearQueryButton && clearQueryButtonTransition > 0.005F) {
       const float scale = 0.82F + clearQueryButtonTransition * 0.18F;
       const Bounds animatedClearButton{
@@ -3119,12 +3217,13 @@ struct PackageView::Impl {
       drawButton(packageRectangles, packageText, packageImages, helpButton, "",
                  palette.elevated, palette.outline, palette.text, "help.png",
                  "package-help:" + package.name);
-      drawButton(packageRectangles, packageText, packageImages, actionButton, "",
+      drawButton(packageRectangles, packageText, packageImages, actionButton,
+                 installed ? "Remove" : "Install",
                  installed ? std::array<float, 3>{0.38F, 0.20F, 0.23F}
                            : palette.primaryContainer,
                  installed ? std::array<float, 3>{0.64F, 0.33F, 0.38F}
                            : palette.primary,
-                 palette.text, installed ? "delete.png" : "install.png",
+                 palette.text, {},
                  "package-action:" + package.name);
 
       std::string packageLabel = package.name + "  " + package.version;
@@ -3136,7 +3235,8 @@ struct PackageView::Impl {
       packageLabel = shortened(std::move(packageLabel), packageTextLength);
       packageText.push_back({std::move(packageLabel), layout.rowContentX,
                              rowY + layout.rowHeight * 0.40F, palette.text});
-      if (!actionInProgress && !package.description.empty() && width >= 600 &&
+      if (settings.showPackageDescriptions && !actionInProgress &&
+          !package.description.empty() && width >= 600 &&
           rowHeight >= 54.0F) {
         const std::size_t descriptionLength = static_cast<std::size_t>(
             packageTextWidth / std::max(1.0F, characterWidth));
@@ -3145,6 +3245,41 @@ struct PackageView::Impl {
              layout.rowContentX, rowY + layout.rowHeight * 0.78F,
              palette.secondaryText});
       }
+    }
+
+    if (packages.empty() && !busy() &&
+        (status == "Type a package name and press Enter to search." ||
+         status == "No matching packages found.")) {
+      const bool noMatches = status == "No matching packages found.";
+      const float centerX = static_cast<float>(width) * 0.5F;
+      const float centerY =
+          layout.firstRowY +
+          (layout.resultsPanel.y + layout.resultsPanel.height - layout.firstRowY) *
+              0.5F;
+      const Bounds iconSurface{centerX - 34.0F, centerY - 82.0F, 68.0F, 68.0F};
+      addRoundedRect(packageRectangles, iconSurface, palette.elevated, 34.0F);
+      packageImages.push_back(
+          {iconPath("search.png"), centerX - 16.0F, centerY - 64.0F,
+           32.0F, 32.0F, 0.82F});
+      const std::size_t detailLimit = static_cast<std::size_t>(std::max(
+          1.0F, (layout.resultsPanel.width - 48.0F) /
+                    std::max(1.0F, characterWidth)));
+      const std::string heading = shortened(
+          noMatches ? "No packages found" : "Find your next app", detailLimit);
+      const std::string detail = shortened(
+          noMatches ? "Try another name or a shorter search."
+                    : "Search package names to browse available software.",
+          detailLimit);
+      const float headingBaseline =
+          centerY + static_cast<float>(renderer.fontSize()) * 0.75F;
+      const float detailBaseline =
+          headingBaseline + static_cast<float>(renderer.fontSize()) * 1.55F;
+      packageText.push_back(
+          {heading, centerX - renderer.measureText(heading) * 0.5F,
+           headingBaseline, palette.text});
+      packageText.push_back(
+          {detail, centerX - renderer.measureText(detail) * 0.5F,
+           detailBaseline, palette.secondaryText});
     }
 
     const Bounds scrollbar = scrollbarThumb(layout);
@@ -3241,8 +3376,8 @@ struct PackageView::Impl {
 };
 
 PackageView::PackageView(core::Window& window, render::Renderer& renderer,
-                         bool pacmanSupported)
-    : impl_(std::make_unique<Impl>(window, renderer, pacmanSupported)) {}
+                         pm::Manager packageManager)
+    : impl_(std::make_unique<Impl>(window, renderer, packageManager)) {}
 
 PackageView::~PackageView() = default;
 

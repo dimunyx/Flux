@@ -2,4 +2,9 @@
 
 #include <string>
 
-int getOS(std::string& distro);
+struct OSInfo {
+  std::string id;
+  std::string idLike;
+};
+
+int getOS(OSInfo& os);

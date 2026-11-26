@@ -7,14 +7,14 @@
 
 Flux is a lightweight Linux software center with a native desktop interface. It brings package search and common package actions into one small application, with a focus on a clean, responsive UI.
 
-> **Current support:** package search, installation, removal, and cache clearing are implemented for Arch Linux with `pacman`. The interface is designed to be independent of a desktop environment, but package-manager support for other distributions is not implemented yet.
+> **Current support:** package search, installation, removal, and cache clearing are implemented for Arch Linux with `pacman` and Fedora-family distributions with DNF. DNF search uses repository package names; DNF4 systems need the `dnf-plugins-core` package for `repoquery` (DNF5 includes it).
 
 ## Features
 
-- Search Arch Linux repositories and see package descriptions and installed status.
+- Search Arch Linux or DNF repositories and see package descriptions and installed status.
 - Install or remove packages through Polkit authentication.
-- Clear the pacman package cache after confirmation.
-- Choose the interface theme and font, adjust font size, and control animation and scrolling behavior.
+- Clear the pacman or DNF package cache after confirmation.
+- Choose the interface theme and font, adjust font size, and control descriptions, animation, and scrolling behavior.
 - Use keyboard navigation and a searchable, animated interface.
 
 ## Requirements
@@ -23,6 +23,7 @@ Flux is a lightweight Linux software center with a native desktop interface. It 
 - CMake 3.28 or newer and a C++26 compiler. Clang is recommended; GCC is also supported.
 - OpenGL development files, GLFW 3.3+, FreeType, Fontconfig, libpng, libepoxy, and pkg-config.
 - For package operations on Arch Linux: `pacman` and Polkit (`pkexec`).
+- For package operations on Fedora-family systems: `dnf`, `rpm`, Polkit (`pkexec`), and `dnf-plugins-core` when using DNF4.
 - Optional: [`just`](https://just.systems/) for the helper commands below.
 - Optional: [Nix](https://nixos.org/) with flakes enabled, to build or install the app without managing the dependencies above.
 
@@ -33,6 +34,30 @@ sudo pacman -S --needed base-devel cmake clang glfw-x11 freetype2 fontconfig lib
 ```
 
 The GLFW package name may differ if you use a different window-system backend.
+
+On Fedora, install the build dependencies with:
+
+```sh
+sudo dnf install clang cmake make glfw-devel freetype-devel fontconfig-devel libpng-devel libepoxy-devel libglvnd-devel pkgconf-pkg-config
+```
+
+To build and install Flux from source on Fedora:
+
+```sh
+git clone https://github.com/dimunyx/Flux.git
+cd Flux
+cmake -S . -B build/Makefiles/Release -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/Makefiles/Release --parallel
+sudo cmake --install build/Makefiles/Release
+```
+
+This installs Flux under `/usr/local`, including its desktop launcher and icon. Start it from the applications menu or run `flux`. For package search and actions, install Polkit; DNF4 systems also need `dnf-plugins-core` for repository search. DNF5 includes the `repoquery` command.
+
+```sh
+sudo dnf install polkit
+# Only needed when the system uses DNF4:
+sudo dnf install dnf-plugins-core
+```
 
 Flux renders text with the system sans-serif font resolved through Fontconfig, the same mechanism GTK and Qt use. The font can be changed in **Settings → Appearance**, where **System default** follows the desktop font; until a font is chosen, the system font is used.
 
@@ -95,7 +120,7 @@ nix develop
 just build
 ```
 
-> Flux's package management actions still call `/usr/bin/pacman` and `/usr/bin/pkexec` directly, so they work when Flux is installed with Nix on Arch Linux. On NixOS the interface starts, but installing and removing packages is unavailable.
+> Flux's package management actions call system commands under `/usr/bin`, so they work with a Nix-installed Flux on supported Arch and Fedora-family systems. On NixOS the interface starts with `--force`, but package actions are not available.
 
 ## Arch Linux package and local repository
 
@@ -166,7 +191,7 @@ Server = https://<user>.github.io/Flux/
 
 ## One version for the app, tags, and packages
 
-The root [`VERSION`](VERSION) file is the single source of truth. It contains one semantic version in `MAJOR.MINOR.PATCH` form, such as `0.1.0`.
+The root [`VERSION`](VERSION) file is the single source of truth. It contains one semantic version in `MAJOR.MINOR.PATCH` form, such as `0.1.1`.
 
 Changing `VERSION` updates the CMake project version. CMake embeds that version in the executable, so `flux --version` and the window title show the same value. CPack also uses the CMake project version for generated package metadata and filenames. The install package includes the executable and its image assets.
 

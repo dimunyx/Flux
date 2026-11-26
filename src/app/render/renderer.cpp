@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <set>
 #include <stdexcept>
@@ -279,11 +280,12 @@ GLuint createProgram(const char* vertexSource, const char* fragmentSource) {
 struct Renderer::Impl {
   struct Character {
     GLuint texture = 0;
+    FT_UInt glyphIndex = 0;
     int width = 0;
     int height = 0;
     int bearingX = 0;
     int bearingY = 0;
-    int advance = 0;
+    float advance = 0.0F;
   };
 
   struct ImageTexture {
@@ -391,20 +393,23 @@ struct Renderer::Impl {
   }
 
   Character rasterizeCharacter(char32_t codepoint) const {
-    if (FT_Load_Char(face, static_cast<FT_ULong>(codepoint), FT_LOAD_RENDER) != 0) {
-      if (codepoint == U'?'
-          || FT_Load_Char(face, static_cast<FT_ULong>(U'?'), FT_LOAD_RENDER) != 0) {
+    FT_ULong loadedCodepoint = static_cast<FT_ULong>(codepoint);
+    constexpr FT_Int32 loadFlags = FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT;
+    if (FT_Load_Char(face, loadedCodepoint, loadFlags) != 0) {
+      loadedCodepoint = static_cast<FT_ULong>(U'?');
+      if (FT_Load_Char(face, loadedCodepoint, loadFlags) != 0) {
         return {};
       }
     }
 
     const FT_Bitmap& bitmap = face->glyph->bitmap;
     Character character{
+        .glyphIndex = FT_Get_Char_Index(face, loadedCodepoint),
         .width = static_cast<int>(bitmap.width),
         .height = static_cast<int>(bitmap.rows),
         .bearingX = face->glyph->bitmap_left,
         .bearingY = face->glyph->bitmap_top,
-        .advance = static_cast<int>(face->glyph->advance.x >> 6)};
+        .advance = static_cast<float>(face->glyph->advance.x) / 64.0F};
 
     if (bitmap.width <= 0 || bitmap.rows <= 0) {
       return character;
@@ -412,13 +417,30 @@ struct Renderer::Impl {
 
     std::vector<unsigned char> pixels(
         static_cast<std::size_t>(bitmap.width) * bitmap.rows);
-    const int pitch = bitmap.pitch;
-    const int stride = pitch >= 0 ? pitch : -pitch;
     for (int row = 0; row < static_cast<int>(bitmap.rows); ++row) {
-      const int sourceRow =
-          pitch >= 0 ? row : static_cast<int>(bitmap.rows) - 1 - row;
-      std::copy_n(bitmap.buffer + sourceRow * stride, bitmap.width,
-                  pixels.data() + static_cast<std::size_t>(row) * bitmap.width);
+      const int sourceRow = bitmap.pitch >= 0
+                                ? row
+                                : static_cast<int>(bitmap.rows) - 1 - row;
+      const unsigned char* source =
+          bitmap.buffer + static_cast<std::ptrdiff_t>(sourceRow) * bitmap.pitch;
+      unsigned char* destination =
+          pixels.data() + static_cast<std::size_t>(row) * bitmap.width;
+      for (int column = 0; column < static_cast<int>(bitmap.width); ++column) {
+        if (bitmap.pixel_mode == FT_PIXEL_MODE_GRAY) {
+          const unsigned int sample = source[column];
+          const unsigned int levels =
+              std::max(2U, static_cast<unsigned int>(bitmap.num_grays));
+          destination[column] = static_cast<unsigned char>(
+              std::min(255U, sample * 255U / (levels - 1U)));
+        } else if (bitmap.pixel_mode == FT_PIXEL_MODE_MONO) {
+          const unsigned char mask = static_cast<unsigned char>(0x80U >> (column % 8));
+          destination[column] = (source[column / 8] & mask) != 0 ? 255 : 0;
+        } else if (bitmap.pixel_mode == FT_PIXEL_MODE_BGRA) {
+          destination[column] = source[column * 4 + 3];
+        } else {
+          return {};
+        }
+      }
     }
 
     glGenTextures(1, &character.texture);
@@ -505,7 +527,9 @@ struct Renderer::Impl {
                  GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -622,12 +646,27 @@ struct Renderer::Impl {
 
   float measureText(std::string_view text) const {
     float width = 0.0F;
+    FT_UInt previousGlyph = 0;
     for (std::size_t offset = 0; offset < text.size();) {
       const DecodedCodepoint decoded = decodeCodepoint(text, offset);
-      width += static_cast<float>(characterForCodepoint(decoded.value).advance);
+      const Character& character = characterForCodepoint(decoded.value);
+      width += kerning(previousGlyph, character.glyphIndex) + character.advance;
+      previousGlyph = character.glyphIndex;
       offset += decoded.length;
     }
     return width;
+  }
+
+  float kerning(FT_UInt previousGlyph, FT_UInt currentGlyph) const {
+    if (previousGlyph == 0 || currentGlyph == 0 || !FT_HAS_KERNING(face)) {
+      return 0.0F;
+    }
+    FT_Vector adjustment{};
+    if (FT_Get_Kerning(face, previousGlyph, currentGlyph, FT_KERNING_DEFAULT,
+                       &adjustment) != 0) {
+      return 0.0F;
+    }
+    return static_cast<float>(adjustment.x) / 64.0F;
   }
 
   void createGraphicsResources() {
@@ -830,12 +869,14 @@ struct Renderer::Impl {
 
     for (const TextItem& item : text) {
       float cursorX = item.x;
+      FT_UInt previousGlyph = 0;
       glUniform3f(colorLocation, item.color[0], item.color[1], item.color[2]);
       glUniform1f(textOpacityLocation, std::clamp(item.opacity, 0.0F, 1.0F));
       for (std::size_t offset = 0; offset < item.text.size();) {
         const DecodedCodepoint decoded = decodeCodepoint(item.text, offset);
         const Character& character = characterForCodepoint(decoded.value);
         offset += decoded.length;
+        cursorX += kerning(previousGlyph, character.glyphIndex);
         const float x = cursorX + static_cast<float>(character.bearingX);
         const float y = item.baseline - static_cast<float>(character.bearingY);
         const float glyphWidth = static_cast<float>(character.width);
@@ -850,7 +891,8 @@ struct Renderer::Impl {
           glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices.data());
           glDrawArrays(GL_TRIANGLES, 0, 6);
         }
-        cursorX += static_cast<float>(character.advance);
+        cursorX += character.advance;
+        previousGlyph = character.glyphIndex;
       }
     }
 

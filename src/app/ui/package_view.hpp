@@ -2,6 +2,8 @@
 
 #include <memory>
 
+#include "pm/pm.hpp"
+
 namespace core {
 class Window;
 }
@@ -14,7 +16,8 @@ namespace ui {
 
 class PackageView {
  public:
-  PackageView(core::Window& window, render::Renderer& renderer, bool pacmanSupported);
+  PackageView(core::Window& window, render::Renderer& renderer,
+              pm::Manager packageManager);
   ~PackageView();
 
   PackageView(const PackageView&) = delete;
